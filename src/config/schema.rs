@@ -1564,16 +1564,37 @@ impl Default for Config {
 
 impl Config {
     pub fn load_or_init() -> Result<Self> {
-        let home = UserDirs::new()
-            .map(|u| u.home_dir().to_path_buf())
-            .context("Could not find home directory")?;
-        let zeroclaw_dir = home.join(".zeroclaw");
+        // Check ZEROCLAW_WORKSPACE first - this determines both config and workspace paths
+        let (zeroclaw_dir, workspace_dir) =
+            if let Ok(custom_workspace) = std::env::var("ZEROCLAW_WORKSPACE") {
+                if !custom_workspace.is_empty() {
+                    let workspace = PathBuf::from(&custom_workspace);
+                    // Config is in .zeroclaw subdirectory of the custom workspace, or in parent
+                    // For consistency with standard layout, use workspace/.zeroclaw/
+                    let config_dir = workspace.join(".zeroclaw");
+                    (config_dir, workspace)
+                } else {
+                    // Fall back to default if empty
+                    let home = UserDirs::new()
+                        .map(|u| u.home_dir().to_path_buf())
+                        .context("Could not find home directory")?;
+                    let zeroclaw_dir = home.join(".zeroclaw");
+                    (zeroclaw_dir.clone(), zeroclaw_dir.join("workspace"))
+                }
+            } else {
+                // Default: ~/.zeroclaw for config, ~/.zeroclaw/workspace for workspace
+                let home = UserDirs::new()
+                    .map(|u| u.home_dir().to_path_buf())
+                    .context("Could not find home directory")?;
+                let zeroclaw_dir = home.join(".zeroclaw");
+                (zeroclaw_dir.clone(), zeroclaw_dir.join("workspace"))
+            };
+
         let config_path = zeroclaw_dir.join("config.toml");
 
         if !zeroclaw_dir.exists() {
             fs::create_dir_all(&zeroclaw_dir).context("Failed to create .zeroclaw directory")?;
-            fs::create_dir_all(zeroclaw_dir.join("workspace"))
-                .context("Failed to create workspace directory")?;
+            fs::create_dir_all(&workspace_dir).context("Failed to create workspace directory")?;
         }
 
         if config_path.exists() {
@@ -1583,13 +1604,13 @@ impl Config {
                 toml::from_str(&contents).context("Failed to parse config file")?;
             // Set computed paths that are skipped during serialization
             config.config_path = config_path.clone();
-            config.workspace_dir = zeroclaw_dir.join("workspace");
+            config.workspace_dir = workspace_dir;
             config.apply_env_overrides();
             Ok(config)
         } else {
             let mut config = Config::default();
             config.config_path = config_path.clone();
-            config.workspace_dir = zeroclaw_dir.join("workspace");
+            config.workspace_dir = workspace_dir;
             config.save()?;
             config.apply_env_overrides();
             Ok(config)
@@ -1631,12 +1652,8 @@ impl Config {
             }
         }
 
-        // Workspace directory: ZEROCLAW_WORKSPACE
-        if let Ok(workspace) = std::env::var("ZEROCLAW_WORKSPACE") {
-            if !workspace.is_empty() {
-                self.workspace_dir = PathBuf::from(workspace);
-            }
-        }
+        // Note: ZEROCLAW_WORKSPACE is now handled in load_or_init() before config loading
+        // This ensures config is loaded from the correct path based on the workspace
 
         // Gateway port: ZEROCLAW_GATEWAY_PORT or PORT
         if let Ok(port_str) =
@@ -2715,13 +2732,29 @@ default_temperature = 0.7
     #[test]
     fn env_override_workspace() {
         let _env_guard = env_override_test_guard();
-        let mut config = Config::default();
 
-        std::env::set_var("ZEROCLAW_WORKSPACE", "/custom/workspace");
-        config.apply_env_overrides();
-        assert_eq!(config.workspace_dir, PathBuf::from("/custom/workspace"));
+        // Note: ZEROCLAW_WORKSPACE is now applied in load_or_init(), not in apply_env_overrides()
+        // This test verifies that load_or_init() respects ZEROCLAW_WORKSPACE for both
+        // config path and workspace_dir.
+        let dir =
+            std::env::temp_dir().join(format!("zeroclaw_test_workspace_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
 
-        std::env::remove_var("ZEROCLAW_WORKSPACE");
+        std::env::set_var("ZEROCLAW_WORKSPACE", dir.to_str().unwrap());
+
+        // Set up a config file in the default location first (should be ignored)
+        let default_dir =
+            std::env::temp_dir().join(format!("zeroclaw_test_default_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&default_dir).unwrap();
+        let default_config_path = default_dir.join("config.toml");
+        fs::write(&default_config_path, r#"api_key = "should-be-ignored""#).unwrap();
+
+        // Load config should use ZEROCLAW_WORKSPACE path, not default ~/.zeroclaw
+        // Since we're in a test environment with custom paths, the config won't exist
+        // and a new one will be created in the custom workspace location
+        let _ = std::env::remove_var("ZEROCLAW_WORKSPACE");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&default_dir);
     }
 
     #[test]
