@@ -7,8 +7,8 @@
 
 use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::hal::units::Hertz;
 use esp_idf_svc::hal::uart::{UartConfig, UartDriver};
+use esp_idf_svc::hal::units::Hertz;
 use log::info;
 use serde::{Deserialize, Serialize};
 
@@ -65,7 +65,8 @@ fn main() -> anyhow::Result<()> {
                     if b == b'\n' {
                         if !line.is_empty() {
                             if let Ok(line_str) = std::str::from_utf8(&line) {
-                                if let Ok(resp) = handle_request(line_str, &mut gpio2, &mut gpio13) {
+                                if let Ok(resp) = handle_request(line_str, &mut gpio2, &mut gpio13)
+                                {
                                     let out = serde_json::to_string(&resp).unwrap_or_default();
                                     let _ = uart.write(format!("{}\n", out).as_bytes());
                                 }

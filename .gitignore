@@ -7,8 +7,10 @@ firmware/*/target
 .env
 
 # Python virtual environments
+
 .venv/
 venv/
 
 # ESP32 build cache (esp-idf-sys managed)
+
 .embuild/
