@@ -37,6 +37,15 @@ pub struct Agent {
     available_hints: Vec<String>,
 }
 
+/// Runtime configuration changes that can be applied without restart.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeConfigUpdate {
+    pub model: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tool_iterations: Option<usize>,
+    pub auto_save: Option<bool>,
+}
+
 pub struct AgentBuilder {
     provider: Option<Box<dyn Provider>>,
     tools: Option<Vec<Box<dyn Tool>>>,
@@ -228,6 +237,26 @@ impl Agent {
 
     pub fn memory_ref(&self) -> &Arc<dyn Memory> {
         &self.memory
+    }
+
+    /// Apply runtime configuration changes without restarting the agent.
+    pub fn apply_config_update(&mut self, update: &RuntimeConfigUpdate) {
+        if let Some(ref model) = update.model {
+            tracing::info!(old = %self.model_name, new = %model, "Updating model");
+            self.model_name = model.clone();
+        }
+        if let Some(temp) = update.temperature {
+            tracing::info!(old = %self.temperature, new = %temp, "Updating temperature");
+            self.temperature = temp;
+        }
+        if let Some(max_iter) = update.max_tool_iterations {
+            tracing::info!(old = %self.config.max_tool_iterations, new = %max_iter, "Updating max_tool_iterations");
+            self.config.max_tool_iterations = max_iter;
+        }
+        if let Some(auto_save) = update.auto_save {
+            tracing::info!(old = %self.auto_save, new = %auto_save, "Updating auto_save");
+            self.auto_save = auto_save;
+        }
     }
 
     pub fn clear_history(&mut self) {
@@ -530,6 +559,175 @@ impl Agent {
             self.trim_history();
         }
 
+        anyhow::bail!(
+            "Agent exceeded maximum tool iterations ({})",
+            self.config.max_tool_iterations
+        )
+    }
+
+    /// Like [`turn`] but emits streaming delta events through the provided sender.
+    ///
+    /// Events are JSON-serializable maps with `event_type` and `data` fields:
+    /// - `{"event_type": "delta", "data": {"text": "..."}}` — incremental text
+    /// - `{"event_type": "tool_call", "data": {"name": "...", "args": ...}}` — tool invocation
+    /// - `{"event_type": "tool_result", "data": {"name": "...", "output": "..."}}` — tool result
+    /// - `{"event_type": "done", "data": {"response": "...", "iterations": N}}` — final
+    pub async fn turn_streaming(
+        &mut self,
+        user_message: &str,
+        delta_tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+    ) -> Result<String> {
+        if self.history.is_empty() {
+            let system_prompt = self.build_system_prompt()?;
+            self.history
+                .push(ConversationMessage::Chat(ChatMessage::system(
+                    system_prompt,
+                )));
+        }
+        if self.auto_save {
+            let _ = self
+                .memory
+                .store("user_msg", user_message, MemoryCategory::Conversation, None)
+                .await;
+        }
+        let context = self
+            .memory_loader
+            .load_context(self.memory.as_ref(), user_message)
+            .await
+            .unwrap_or_default();
+        let enriched = if context.is_empty() {
+            user_message.to_string()
+        } else {
+            format!("{context}{user_message}")
+        };
+        self.history
+            .push(ConversationMessage::Chat(ChatMessage::user(enriched)));
+        let effective_model = self.classify_model(user_message);
+        let mut iteration = 0;
+        for _ in 0..self.config.max_tool_iterations {
+            iteration += 1;
+            let messages = self.tool_dispatcher.to_provider_messages(&self.history);
+            // Use streaming provider path if supported, otherwise non-streaming
+            let (response_text, tool_calls_from_response) = if self.provider.supports_streaming() {
+                use futures::StreamExt;
+                let msgs_clone: Vec<ChatMessage> = messages.clone();
+                let mut stream = self.provider.stream_chat_with_history(
+                    &msgs_clone,
+                    &effective_model,
+                    self.temperature,
+                    crate::providers::traits::StreamOptions::new(true),
+                );
+                let mut accumulated = String::new();
+                while let Some(chunk_result) = stream.next().await {
+                    match chunk_result {
+                        Ok(chunk) => {
+                            if !chunk.delta.is_empty() {
+                                accumulated.push_str(&chunk.delta);
+                                let _ = delta_tx
+                                    .send(serde_json::json!({
+                                        "event_type": "delta",
+                                        "data": { "text": chunk.delta }
+                                    }))
+                                    .await;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Stream chunk error: {e}");
+                            break;
+                        }
+                    }
+                }
+                // Build a ChatResponse from accumulated text so tool_dispatcher can parse
+                let synth_response = crate::providers::ChatResponse {
+                    text: Some(accumulated),
+                    tool_calls: vec![],
+                };
+                let (text, calls) = self.tool_dispatcher.parse_response(&synth_response);
+                (text, calls)
+            } else {
+                let response = self
+                    .provider
+                    .chat(
+                        ChatRequest {
+                            messages: &messages,
+                            tools: if self.tool_dispatcher.should_send_tool_specs() {
+                                Some(&self.tool_specs)
+                            } else {
+                                None
+                            },
+                        },
+                        &effective_model,
+                        self.temperature,
+                    )
+                    .await?;
+                let (text, calls) = self.tool_dispatcher.parse_response(&response);
+                // Non-streaming: emit whole text as single delta
+                if calls.is_empty() && !text.is_empty() {
+                    let _ = delta_tx
+                        .send(serde_json::json!({
+                            "event_type": "delta",
+                            "data": { "text": text }
+                        }))
+                        .await;
+                }
+                (text, calls)
+            };
+
+            // No tool calls = final response
+            if tool_calls_from_response.is_empty() {
+                let final_text = response_text;
+                self.history
+                    .push(ConversationMessage::Chat(ChatMessage::assistant(
+                        final_text.clone(),
+                    )));
+                self.trim_history();
+                let _ = delta_tx
+                    .send(serde_json::json!({
+                        "event_type": "done",
+                        "data": { "response": final_text, "iterations": iteration }
+                    }))
+                    .await;
+                return Ok(final_text);
+            }
+
+            // Tool calls present — emit events, execute, loop
+            if !response_text.is_empty() {
+                self.history
+                    .push(ConversationMessage::Chat(ChatMessage::assistant(
+                        response_text.clone(),
+                    )));
+            }
+
+            // Record tool call attempt in history (use empty ChatResponse tool_calls
+            // since XML dispatchers embed calls in text).
+            self.history.push(ConversationMessage::AssistantToolCalls {
+                text: Some(response_text),
+                tool_calls: vec![],
+            });
+
+            for call in &tool_calls_from_response {
+                let _ = delta_tx
+                    .send(serde_json::json!({
+                        "event_type": "tool_call",
+                        "data": { "name": call.name, "args": call.arguments }
+                    }))
+                    .await;
+            }
+
+            let results = self.execute_tools(&tool_calls_from_response).await;
+            for result in &results {
+                let _ = delta_tx
+                    .send(serde_json::json!({
+                        "event_type": "tool_result",
+                        "data": { "name": result.name, "output": result.output, "success": result.success }
+                    }))
+                    .await;
+            }
+
+            let formatted = self.tool_dispatcher.format_results(&results);
+            self.history.push(formatted);
+            self.trim_history();
+        }
         anyhow::bail!(
             "Agent exceeded maximum tool iterations ({})",
             self.config.max_tool_iterations

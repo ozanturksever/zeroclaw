@@ -172,6 +172,7 @@ mod tests {
                 channel: "test".to_string(),
                 metadata: HashMap::from([("sender".to_string(), "user-1".to_string())]),
                 response_tx,
+                stream_delta_tx: None,
             })
             .await
             .unwrap();

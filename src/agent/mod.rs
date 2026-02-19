@@ -10,6 +10,6 @@ pub mod prompt;
 mod tests;
 
 #[allow(unused_imports)]
-pub use agent::{Agent, AgentBuilder};
+pub use agent::{Agent, AgentBuilder, RuntimeConfigUpdate};
 #[allow(unused_imports)]
 pub use loop_::{process_message, run};

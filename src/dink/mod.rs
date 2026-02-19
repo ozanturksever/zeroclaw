@@ -67,37 +67,49 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
         .await
         .map_err(|e| anyhow::anyhow!("Dink runtime connection failed: {e:#}"))?;
 
-    let (edge_service, mut agent_rx) = ZeroClawEdgeService::new();
+    let (edge_service, mut agent_rx, mut config_rx) = ZeroClawEdgeService::new();
     let edge_service = Arc::new(edge_service);
     runtime.expose_service(edge_service.clone()).await?;
     tracing::info!("Dink listener started \u{2014} ZeroClawService exposed, awaiting messages");
-
     let mut agent = crate::agent::Agent::from_config(config)?;
-
     // Share the agent's memory with the edge service for RecallMemory RPC
     edge_service.set_memory(agent.memory_ref().clone()).await;
-
-    while let Some(req) = agent_rx.recv().await {
-        tracing::debug!(
-            channel = %req.channel,
-            "Dink listener: processing message"
-        );
-
-        let result = agent.turn(&req.message).await;
-
-        let response = match result {
-            Ok(text) => Ok(AgentResponse {
-                response: text,
-                tool_calls: Vec::new(),
-                iterations: 0,
-            }),
-            Err(e) => Err(e),
-        };
-
-        // Send response back; ignore error if caller timed out
+    loop {
+        tokio::select! {
+            Some(req) = agent_rx.recv() => {
+                tracing::debug!(
+                    channel = %req.channel,
+                    streaming = req.stream_delta_tx.is_some(),
+                    "Dink listener: processing message"
+                );
+        let response = if let Some(delta_tx) = req.stream_delta_tx {
+                    match agent.turn_streaming(&req.message, delta_tx).await {
+                        Ok(text) => Ok(AgentResponse {
+                            response: text,
+                            tool_calls: Vec::new(),
+                            iterations: 0,
+                        }),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    match agent.turn(&req.message).await {
+                        Ok(text) => Ok(AgentResponse {
+                            response: text,
+                            tool_calls: Vec::new(),
+                            iterations: 0,
+                        }),
+                        Err(e) => Err(e),
+                    }
+                };
         let _ = req.response_tx.send(response);
+            }
+            Some(update) = config_rx.recv() => {
+                tracing::info!(?update, "Applying runtime config update");
+                agent.apply_config_update(&update);
+            }
+            else => break,
+        }
     }
-
     tracing::info!("Dink listener finished \u{2014} edge service channel closed");
     Ok(())
 }

@@ -21,6 +21,8 @@ pub struct AgentRequest {
     pub channel: String,
     pub metadata: HashMap<String, String>,
     pub response_tx: tokio::sync::oneshot::Sender<anyhow::Result<AgentResponse>>,
+    /// When set, the agent loop should use `turn_streaming` and relay deltas here.
+    pub stream_delta_tx: Option<tokio::sync::mpsc::Sender<serde_json::Value>>,
 }
 
 /// The agent loop's response to a forwarded request.
@@ -132,6 +134,7 @@ pub struct ZeroClawEdgeService {
     agent_sender: Arc<RwLock<Option<tokio::sync::mpsc::Sender<AgentRequest>>>>,
     status: Arc<RwLock<InstanceStatus>>,
     memory: Arc<RwLock<Option<Arc<dyn crate::memory::Memory>>>>,
+    config_tx: tokio::sync::mpsc::Sender<crate::agent::RuntimeConfigUpdate>,
 }
 
 impl ZeroClawEdgeService {
@@ -139,8 +142,13 @@ impl ZeroClawEdgeService {
     ///
     /// The agent loop should read from the returned `Receiver<AgentRequest>`,
     /// process each request, and send back a result on `response_tx`.
-    pub fn new() -> (Self, tokio::sync::mpsc::Receiver<AgentRequest>) {
+    pub fn new() -> (
+        Self,
+        tokio::sync::mpsc::Receiver<AgentRequest>,
+        tokio::sync::mpsc::Receiver<crate::agent::RuntimeConfigUpdate>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let (config_tx, config_rx) = tokio::sync::mpsc::channel(16);
         let service = Self {
             agent_sender: Arc::new(RwLock::new(Some(tx))),
             status: Arc::new(RwLock::new(InstanceStatus {
@@ -148,8 +156,9 @@ impl ZeroClawEdgeService {
                 ..Default::default()
             })),
             memory: Arc::new(RwLock::new(None)),
+            config_tx,
         };
-        (service, rx)
+        (service, rx, config_rx)
     }
 
     /// Attach a memory backend for RecallMemory RPC.
@@ -187,6 +196,7 @@ impl ZeroClawEdgeService {
                 channel,
                 metadata,
                 response_tx,
+                stream_delta_tx: None,
             })
             .await
             .map_err(|_| dink_err("agent channel closed"))?;
@@ -297,11 +307,33 @@ impl ServiceHandler for ZeroClawEdgeService {
             "UpdateConfig" => {
                 let req: ZcUpdateConfigRequest = serde_json::from_slice(req_data)
                     .map_err(|e| dink_err(format!("malformed UpdateConfig request: {e}")))?;
-                // TODO: Apply config changes to the running agent instance.
-                // For now acknowledge without applying.
                 tracing::info!(keys = ?req.config.keys().collect::<Vec<_>>(), restart = req.restart, "UpdateConfig RPC received");
+
+                // Build a RuntimeConfigUpdate from the JSON payload
+                let mut update = crate::agent::RuntimeConfigUpdate::default();
+                if let Some(model) = req.config.get("model").and_then(|v| v.as_str()) {
+                    update.model = Some(model.to_string());
+                }
+                if let Some(temp) = req.config.get("temperature").and_then(|v| v.as_f64()) {
+                    update.temperature = Some(temp);
+                }
+                if let Some(max_iter) = req.config.get("max_tool_iterations").and_then(|v| v.as_u64()) {
+                    update.max_tool_iterations = Some(max_iter as usize);
+                }
+                if let Some(auto_save) = req.config.get("auto_save").and_then(|v| v.as_bool()) {
+                    update.auto_save = Some(auto_save);
+                }
+
+                let applied = update.model.is_some()
+                    || update.temperature.is_some()
+                    || update.max_tool_iterations.is_some()
+                    || update.auto_save.is_some();
+
+                if applied {
+                    let _ = self.config_tx.send(update).await;
+                }
                 let resp = ZcUpdateConfigResponse {
-                    applied: !req.config.is_empty(),
+                    applied,
                     restart_scheduled: req.restart,
                 };
                 serde_json::to_vec(&resp)
@@ -322,26 +354,50 @@ impl ServiceHandler for ZeroClawEdgeService {
             "StreamMessage" => {
                 let req: ZcSendMessageRequest = serde_json::from_slice(req_data)
                     .map_err(|e| dink_err(format!("malformed StreamMessage request: {e}")))?;
+                tracing::info!(channel = %req.channel, "StreamMessage: starting");
 
-                let agent_resp = self
-                    .send_to_agent(req.message, req.channel, req.metadata)
-                    .await?;
+                let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(128);
+                let sender_guard = self.agent_sender.read().await;
+                let sender = sender_guard
+                    .as_ref()
+                    .ok_or_else(|| dink_err("agent not started"))?;
 
-                // Emit the full response as a single "done" event.
-                // TODO: Wire up true streaming once the agent loop supports it.
-                let event = ZcStreamEvent {
-                    event_type: "done".to_string(),
-                    data: serde_json::to_value(&ZcSendMessageResponse {
-                        response: agent_resp.response,
-                        tool_calls: agent_resp.tool_calls,
-                        iterations: agent_resp.iterations,
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                sender
+                    .send(AgentRequest {
+                        message: req.message,
+                        channel: req.channel,
+                        metadata: req.metadata,
+                        response_tx,
+                        stream_delta_tx: Some(delta_tx),
                     })
-                    .map_err(|e| dink_err(format!("serialization error: {e}")))?,
-                };
-                let bytes = serde_json::to_vec(&event)
-                    .map_err(|e| dink_err(format!("serialization error: {e}")))?;
-                emit(bytes)?;
+                    .await
+                    .map_err(|_| dink_err("agent channel closed"))?;
+                tracing::debug!("StreamMessage: request sent to agent, awaiting deltas");
 
+                let mut event_count = 0u32;
+                while let Some(event_value) = delta_rx.recv().await {
+                    event_count += 1;
+                    let event_type = event_value.get("event_type").and_then(|v| v.as_str()).unwrap_or("?");
+                    tracing::debug!(event_count, event_type, "StreamMessage: emitting event");
+                    let bytes = serde_json::to_vec(&event_value)
+                        .map_err(|e| dink_err(format!("serialization error: {e}")))?;
+                    emit(bytes)?;
+                }
+
+                tracing::info!(event_count, "StreamMessage: delta channel closed, awaiting final response");
+                let _resp = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    response_rx,
+                )
+                .await
+                .map_err(|_| dink_err("stream response timed out"))?
+                .map_err(|_| dink_err("agent response channel dropped"))?
+                .map_err(|e| dink_err(format!("agent error: {e}")))?;
+                tracing::info!("StreamMessage: complete");
+                // Small delay to let the last emit task flush to NATS before
+                // the edge SDK publishes the .done signal that closes the client subscription.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 Ok(())
             }
 
