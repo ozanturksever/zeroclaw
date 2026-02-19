@@ -226,6 +226,10 @@ impl Agent {
         &self.history
     }
 
+    pub fn memory_ref(&self) -> &Arc<dyn Memory> {
+        &self.memory
+    }
+
     pub fn clear_history(&mut self) {
         self.history.clear();
     }

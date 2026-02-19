@@ -131,6 +131,7 @@ fn dink_err(msg: impl Into<String>) -> DinkError {
 pub struct ZeroClawEdgeService {
     agent_sender: Arc<RwLock<Option<tokio::sync::mpsc::Sender<AgentRequest>>>>,
     status: Arc<RwLock<InstanceStatus>>,
+    memory: Arc<RwLock<Option<Arc<dyn crate::memory::Memory>>>>,
 }
 
 impl ZeroClawEdgeService {
@@ -146,8 +147,15 @@ impl ZeroClawEdgeService {
                 status: "initializing".to_string(),
                 ..Default::default()
             })),
+            memory: Arc::new(RwLock::new(None)),
         };
         (service, rx)
+    }
+
+    /// Attach a memory backend for RecallMemory RPC.
+    pub async fn set_memory(&self, memory: Arc<dyn crate::memory::Memory>) {
+        let mut guard = self.memory.write().await;
+        *guard = Some(memory);
     }
 
     /// Replace the current instance status snapshot.
@@ -257,12 +265,31 @@ impl ServiceHandler for ZeroClawEdgeService {
             "RecallMemory" => {
                 let req: ZcRecallMemoryRequest = serde_json::from_slice(req_data)
                     .map_err(|e| dink_err(format!("malformed RecallMemory request: {e}")))?;
-                // TODO: Wire up actual memory/RAG retrieval from agent state.
-                // For now return empty results.
-                let resp = ZcRecallMemoryResponse {
-                    memories: vec![],
-                    total: 0,
+
+                let memory_guard = self.memory.read().await;
+                let entries = if let Some(mem) = memory_guard.as_ref() {
+                    let limit = if req.limit > 0 { req.limit as usize } else { 10 };
+                    mem.recall(&req.query, limit, None)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    vec![]
                 };
+
+                let total = entries.len() as i32;
+                let memories: Vec<serde_json::Value> = entries
+                    .into_iter()
+                    .map(|e| serde_json::json!({
+                        "id": e.id,
+                        "key": e.key,
+                        "content": e.content,
+                        "category": e.category.to_string(),
+                        "timestamp": e.timestamp,
+                        "score": e.score,
+                    }))
+                    .collect();
+
+                let resp = ZcRecallMemoryResponse { memories, total };
                 serde_json::to_vec(&resp)
                     .map_err(|e| dink_err(format!("serialization error: {e}")))
             }

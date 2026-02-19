@@ -68,10 +68,14 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
         .map_err(|e| anyhow::anyhow!("Dink runtime connection failed: {e:#}"))?;
 
     let (edge_service, mut agent_rx) = ZeroClawEdgeService::new();
-    runtime.expose_service(Arc::new(edge_service)).await?;
+    let edge_service = Arc::new(edge_service);
+    runtime.expose_service(edge_service.clone()).await?;
     tracing::info!("Dink listener started \u{2014} ZeroClawService exposed, awaiting messages");
 
     let mut agent = crate::agent::Agent::from_config(config)?;
+
+    // Share the agent's memory with the edge service for RecallMemory RPC
+    edge_service.set_memory(agent.memory_ref().clone()).await;
 
     while let Some(req) = agent_rx.recv().await {
         tracing::debug!(
