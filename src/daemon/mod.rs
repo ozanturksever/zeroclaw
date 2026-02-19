@@ -58,6 +58,20 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
         }
     }
 
+    #[cfg(feature = "dink")]
+    if config.dink.enabled {
+        let dink_cfg = config.clone();
+        handles.push(spawn_component_supervisor(
+            "dink",
+            initial_backoff,
+            max_backoff,
+            move || {
+                let cfg = dink_cfg.clone();
+                async move { crate::dink::start_dink_listener(&cfg).await }
+            },
+        ));
+    }
+
     if config.heartbeat.enabled {
         let heartbeat_cfg = config.clone();
         handles.push(spawn_component_supervisor(

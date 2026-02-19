@@ -1,0 +1,49 @@
+# ZeroClaw + OOSS Dink Integration Example
+# Copy to ~/.config/zeroclaw/config.toml and fill in your values.
+
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-20250514"
+
+[agent]
+max_tool_iterations = 15
+
+[memory]
+backend = "sqlite"
+auto_save = true
+
+# --- Dink Edge Mesh Integration ---
+# Connects ZeroClaw to the OOSS edge mesh via Dink.
+# Requires building with `--features dink`.
+[dink]
+enabled = true
+# NATS server URL for the Dink mesh
+server_url = "nats://dink.internal:4222"
+# Edge key issued by Dink center (dk_<env>_ed_<appId>_<edgeId>_<secret>)
+edge_key = "dk_dev_ed_app123_edge456_secret"
+# OOSS application/workspace identifier
+app_id = "ooss-workspace-1"
+# Services this edge exposes to the mesh
+services = ["AgentToolsService", "ZeroClawService"]
+# Connection timeout in milliseconds
+connect_timeout_ms = 5000
+# Per-request timeout in milliseconds
+request_timeout_ms = 30000
+# Whether to register as a callable edge on the mesh
+expose_as_edge = true
+
+# Labels attached to this edge for discovery filtering
+[dink.edge_labels]
+runtime = "zeroclaw"
+version = "0.1.0"
+
+# --- Instance Identity ---
+# Identifies this ZeroClaw instance within the OOSS workspace.
+# Used for capability token scoping and audit trails.
+[instance_identity]
+instance_id = "inst_abc123"
+user_id = "user_ozan"
+workspace_id = "ws_xyz789"
+purpose = "coding-assistant"
+
+[runtime]
+kind = "native"

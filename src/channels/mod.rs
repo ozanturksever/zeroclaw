@@ -3143,6 +3143,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
             NostrChannel::new(&ns.private_key, ns.relays.clone(), &ns.allowed_pubkeys).await?,
         ));
     }
+
     if channels.is_empty() {
         println!("No channels configured. Run `zeroclaw onboard` to set up channels.");
         return Ok(());

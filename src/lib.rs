@@ -67,8 +67,10 @@ pub(crate) mod security;
 pub(crate) mod service;
 pub(crate) mod skills;
 pub mod tools;
-pub(crate) mod tunnel;
-pub(crate) mod util;
+pub mod tunnel;
+pub mod util;
+#[cfg(feature = "dink")]
+pub mod dink;
 
 pub use config::Config;
 

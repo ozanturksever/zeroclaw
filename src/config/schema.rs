@@ -206,6 +206,14 @@ pub struct Config {
     /// Voice transcription configuration (Whisper API via Groq).
     #[serde(default)]
     pub transcription: TranscriptionConfig,
+
+    /// Dink edge mesh configuration for OOSS platform connectivity.
+    #[serde(default)]
+    pub dink: DinkConfig,
+
+    /// OOSS instance identity (set by platform when running as managed instance).
+    #[serde(default)]
+    pub instance_identity: OossInstanceIdentity,
 }
 
 // ── Delegate Agents ──────────────────────────────────────────────
@@ -360,6 +368,91 @@ impl Default for TranscriptionConfig {
             model: default_transcription_model(),
             language: None,
             max_duration_secs: default_transcription_max_duration_secs(),
+        }
+    }
+}
+
+// ── Dink edge mesh (OOSS integration) ──────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct DinkConfig {
+    /// Enable Dink edge mesh connectivity
+    pub enabled: bool,
+    /// Dink server URL (e.g. "nats://dink.internal:4222")
+    pub server_url: String,
+    /// Dink edge key (dk_env_ed_appId_edgeId_secret or base64 JSON)
+    pub edge_key: String,
+    /// Center API key for calling other edges (app-level key)
+    pub center_api_key: Option<String>,
+    /// Dink app identity
+    pub app_id: String,
+    /// Allowed service names to expose as tools (e.g. ["AgentToolsService"])
+    pub services: Vec<String>,
+    /// OOSS capability token for scope filtering
+    pub capability_token: Option<String>,
+    /// Connection timeout in milliseconds
+    #[serde(default = "default_dink_connect_timeout")]
+    pub connect_timeout_ms: u64,
+    /// Request timeout in milliseconds
+    #[serde(default = "default_dink_request_timeout")]
+    pub request_timeout_ms: u64,
+    /// Register this instance as a Dink edge (default: true)
+    #[serde(default = "default_true")]
+    pub expose_as_edge: bool,
+    /// Labels for edge discovery (e.g. runtime=zeroclaw)
+    #[serde(default)]
+    pub edge_labels: HashMap<String, String>,
+}
+
+fn default_dink_connect_timeout() -> u64 {
+    5_000
+}
+
+fn default_dink_request_timeout() -> u64 {
+    30_000
+}
+
+impl Default for DinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server_url: String::new(),
+            edge_key: String::new(),
+            center_api_key: None,
+            app_id: String::new(),
+            services: Vec::new(),
+            capability_token: None,
+            connect_timeout_ms: default_dink_connect_timeout(),
+            request_timeout_ms: default_dink_request_timeout(),
+            expose_as_edge: true,
+            edge_labels: HashMap::new(),
+        }
+    }
+}
+
+// ── OOSS instance identity ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct OossInstanceIdentity {
+    /// Unique instance identifier (e.g. "inst_abc123")
+    pub instance_id: String,
+    /// User identifier
+    pub user_id: String,
+    /// Workspace identifier
+    pub workspace_id: String,
+    /// Human-readable purpose label
+    pub purpose: String,
+}
+
+impl Default for OossInstanceIdentity {
+    fn default() -> Self {
+        Self {
+            instance_id: String::new(),
+            user_id: String::new(),
+            workspace_id: String::new(),
+            purpose: String::new(),
         }
     }
 }
@@ -3417,6 +3510,8 @@ impl Default for Config {
             agents: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
+            dink: DinkConfig::default(),
+            instance_identity: OossInstanceIdentity::default(),
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
         }
@@ -3765,6 +3860,26 @@ impl Config {
         fs::create_dir_all(&workspace_dir)
             .await
             .context("Failed to create workspace directory")?;
+
+        // Check for base64-encoded config from environment (sandbox/container mode)
+        if let Ok(b64) = std::env::var("ZEROCLAW_CONFIG_BASE64") {
+            use base64::Engine;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64.as_bytes())
+                .context("Failed to decode ZEROCLAW_CONFIG_BASE64")?;
+            let contents = String::from_utf8(decoded)
+                .context("ZEROCLAW_CONFIG_BASE64 is not valid UTF-8")?;
+            let mut config: Config =
+                toml::from_str(&contents).context("Failed to parse ZEROCLAW_CONFIG_BASE64")?;
+            config.config_path = config_path.clone();
+            config.workspace_dir = workspace_dir;
+            config.apply_env_overrides();
+            tracing::info!(
+                "Loaded config from ZEROCLAW_CONFIG_BASE64 ({} bytes)",
+                contents.len(),
+            );
+            return Ok(config);
+        }
 
         if config_path.exists() {
             // Warn if config file is world-readable (may contain API keys)
@@ -4689,6 +4804,8 @@ default_temperature = 0.7
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
+            dink: DinkConfig::default(),
+            instance_identity: OossInstanceIdentity::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -4863,6 +4980,8 @@ tool_dispatcher = "xml"
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
+            dink: DinkConfig::default(),
+            instance_identity: OossInstanceIdentity::default(),
         };
 
         config.save().await.unwrap();

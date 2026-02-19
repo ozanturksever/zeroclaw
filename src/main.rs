@@ -29,7 +29,8 @@
     clippy::unnecessary_literal_bound,
     clippy::unnecessary_map_or,
     clippy::unnecessary_wraps,
-    dead_code
+    dead_code,
+    unused_imports
 )]
 
 use anyhow::{bail, Context, Result};
@@ -48,40 +49,43 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     Ok(t)
 }
 
-mod agent;
-mod approval;
-mod auth;
-mod channels;
-mod rag {
-    pub use zeroclaw::rag::*;
-}
-mod config;
-mod cost;
-mod cron;
-mod daemon;
-mod doctor;
-mod gateway;
-mod hardware;
-mod health;
-mod heartbeat;
-mod hooks;
-mod identity;
-mod integrations;
-mod memory;
-mod migration;
-mod multimodal;
-mod observability;
-mod onboard;
-mod peripherals;
-mod providers;
-mod runtime;
-mod security;
-mod service;
-mod skillforge;
-mod skills;
-mod tools;
-mod tunnel;
-mod util;
+// Re-export all shared modules from the library crate to avoid type duplication.
+// Only `skillforge` is binary-only (not in lib.rs).
+// See: `mod rag` was already migrated to this pattern.
+mod agent { pub use zeroclaw::agent::*; }
+mod approval { pub use zeroclaw::approval::*; }
+mod auth { pub use zeroclaw::auth::*; }
+mod channels { pub use zeroclaw::channels::*; }
+mod config { pub use zeroclaw::config::*; }
+mod cost { pub use zeroclaw::cost::*; }
+mod cron { pub use zeroclaw::cron::*; }
+mod daemon { pub use zeroclaw::daemon::*; }
+mod doctor { pub use zeroclaw::doctor::*; }
+mod gateway { pub use zeroclaw::gateway::*; }
+mod hardware { pub use zeroclaw::hardware::*; }
+mod health { pub use zeroclaw::health::*; }
+mod heartbeat { pub use zeroclaw::heartbeat::*; }
+mod hooks { pub use zeroclaw::hooks::*; }
+mod identity { pub use zeroclaw::identity::*; }
+mod integrations { pub use zeroclaw::integrations::*; }
+mod memory { pub use zeroclaw::memory::*; }
+mod migration { pub use zeroclaw::migration::*; }
+mod multimodal { pub use zeroclaw::multimodal::*; }
+mod observability { pub use zeroclaw::observability::*; }
+mod onboard { pub use zeroclaw::onboard::*; }
+mod peripherals { pub use zeroclaw::peripherals::*; }
+mod providers { pub use zeroclaw::providers::*; }
+mod rag { pub use zeroclaw::rag::*; }
+mod runtime { pub use zeroclaw::runtime::*; }
+mod security { pub use zeroclaw::security::*; }
+mod service { pub use zeroclaw::service::*; }
+mod skillforge;  // binary-only — not in lib.rs
+mod skills { pub use zeroclaw::skills::*; }
+mod tools { pub use zeroclaw::tools::*; }
+mod tunnel { pub use zeroclaw::tunnel::*; }
+mod util { pub use zeroclaw::util::*; }
+#[cfg(feature = "dink")]
+mod dink { pub use zeroclaw::dink::*; }
 
 use config::Config;
 
@@ -131,6 +135,7 @@ struct Cli {
     command: Commands,
 }
 
+use zeroclaw::{ServiceCommands, ChannelCommands, SkillCommands, MigrateCommands, CronCommands, IntegrationCommands};
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Initialize your workspace and configuration
@@ -789,6 +794,7 @@ async fn main() -> Result<()> {
             } else {
                 info!("🧠 Starting ZeroClaw Daemon on {host}:{port}");
             }
+            // Dink listener is spawned by daemon::run() when dink feature + config enabled
             daemon::run(config, host, port).await
         }
 
@@ -963,7 +969,19 @@ async fn main() -> Result<()> {
         },
 
         Commands::Channel { channel_command } => match channel_command {
-            ChannelCommands::Start => channels::start_channels(config).await,
+            ChannelCommands::Start => {
+                // Spawn Dink listener alongside channels
+                #[cfg(feature = "dink")]
+                if config.dink.enabled {
+                    let dink_cfg = config.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = dink::start_dink_listener(&dink_cfg).await {
+                            tracing::warn!("Dink listener failed: {e:#}");
+                        }
+                    });
+                }
+                channels::start_channels(config).await
+            }
             ChannelCommands::Doctor => channels::doctor_channels(config).await,
             other => channels::handle_command(other, &config).await,
         },

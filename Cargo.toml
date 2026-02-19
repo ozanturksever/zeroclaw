@@ -87,6 +87,9 @@ parking_lot = "0.12"
 # Async traits
 async-trait = "0.1"
 
+# Dink edge mesh SDK for OOSS platform connectivity (optional)
+dink-sdk = { version = "0.1", optional = true }
+
 # HMAC-SHA256 (Zhipu/GLM JWT auth)
 ring = "0.17"
 
@@ -199,6 +202,8 @@ probe = ["dep:probe-rs"]
 rag-pdf = ["dep:pdf-extract"]
 # whatsapp-web = Native WhatsApp Web client with custom rusqlite storage backend
 whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-proto", "dep:wa-rs-ureq-http", "dep:wa-rs-tokio-transport", "dep:serde-big-array", "dep:prost"]
+# Dink edge mesh integration for OOSS platform
+dink = ["dep:dink-sdk"]
 
 [profile.release]
 opt-level = "z"      # Optimize for size
