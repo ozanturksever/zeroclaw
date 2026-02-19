@@ -244,6 +244,104 @@ impl ComposioTool {
         Ok(result)
     }
 
+    /// List connected accounts for the given entity, optionally filtered by app.
+    ///
+    /// Uses v3 endpoint first and falls back to v2 for compatibility.
+    pub async fn list_connected_accounts(
+        &self,
+        app_name: Option<&str>,
+        entity_id: &str,
+    ) -> anyhow::Result<Vec<ComposioConnectedAccount>> {
+        match self
+            .list_connected_accounts_v3(app_name, entity_id)
+            .await
+        {
+            Ok(accounts) => Ok(accounts),
+            Err(v3_err) => match self.list_connected_accounts_v2(app_name, entity_id).await {
+                Ok(accounts) => Ok(accounts),
+                Err(v2_err) => anyhow::bail!(
+                    "Composio connected_accounts failed on v3 ({v3_err}) and v2 fallback ({v2_err})"
+                ),
+            },
+        }
+    }
+
+    async fn list_connected_accounts_v3(
+        &self,
+        app_name: Option<&str>,
+        entity_id: &str,
+    ) -> anyhow::Result<Vec<ComposioConnectedAccount>> {
+        let url = format!("{COMPOSIO_API_BASE_V3}/connected_accounts");
+        let mut req = self
+            .client()
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .query(&[("user_id", entity_id)]);
+
+        if let Some(app) = app_name.map(str::trim).filter(|s| !s.is_empty()) {
+            req = req.query(&[("toolkit_slug", app)]);
+        }
+
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 connected_accounts failed: {err}");
+        }
+
+        let body: ComposioConnectedAccountsResponse = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 connected_accounts response")?;
+        Ok(body.items)
+    }
+
+    async fn list_connected_accounts_v2(
+        &self,
+        app_name: Option<&str>,
+        entity_id: &str,
+    ) -> anyhow::Result<Vec<ComposioConnectedAccount>> {
+        let url = format!("{COMPOSIO_API_BASE_V2}/connectedAccounts");
+        let mut req = self
+            .client()
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .query(&[("entityId", entity_id)]);
+
+        if let Some(app) = app_name.map(str::trim).filter(|s| !s.is_empty()) {
+            req = req.query(&[("appName", app)]);
+        }
+
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v2 connectedAccounts failed: {err}");
+        }
+
+        let body: ComposioConnectedAccountsResponse = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v2 connectedAccounts response")?;
+        Ok(body.items)
+    }
+
+    /// Resolve the first active connected account ID for the given entity + app.
+    ///
+    /// Returns `None` when no active account is found (caller decides whether to bail).
+    pub async fn resolve_connected_account_id(
+        &self,
+        app_name: &str,
+        entity_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let accounts = self
+            .list_connected_accounts(Some(app_name), entity_id)
+            .await?;
+        let active = accounts
+            .into_iter()
+            .find(|a| a.is_active())
+            .map(|a| a.id);
+        Ok(active)
+    }
+
     /// Get the OAuth connection URL for a specific app/toolkit or auth config.
     ///
     /// Uses v3 endpoint first and falls back to v2 for compatibility.
@@ -400,7 +498,8 @@ impl Tool for ComposioTool {
 
     fn description(&self) -> &str {
         "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). \
-         Use action='list' to see available actions, action='execute' with action_name/tool_slug, params, and optional connected_account_id, \
+         Use action='list' to see available actions, action='execute' with action_name/tool_slug and params (connected_account_id auto-resolved when omitted), \
+         action='connected_accounts' to list OAuth-connected accounts after login, \
          or action='connect' with app/auth_config_id to get OAuth URL."
     }
 
@@ -410,8 +509,8 @@ impl Tool for ComposioTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "The operation: 'list' (list available actions), 'execute' (run an action), or 'connect' (get OAuth URL)",
-                    "enum": ["list", "execute", "connect"]
+                    "description": "The operation: 'list' (list available actions), 'execute' (run an action), 'connected_accounts' (list OAuth-connected accounts), or 'connect' (get OAuth URL)",
+                    "enum": ["list", "execute", "connected_accounts", "connect"]
                 },
                 "app": {
                     "type": "string",
@@ -519,7 +618,33 @@ impl Tool for ComposioTool {
                     })?;
 
                 let params = args.get("params").cloned().unwrap_or(json!({}));
-                let acct_ref = args.get("connected_account_id").and_then(|v| v.as_str());
+
+                // Use explicitly supplied connected_account_id, or auto-resolve from the
+                // entity's active connections for the target app.
+                let explicit_acct = args.get("connected_account_id").and_then(|v| v.as_str());
+                let resolved_acct: Option<String>;
+                let acct_ref: Option<&str> = if explicit_acct.is_some() {
+                    explicit_acct
+                } else {
+                    // Derive app name from action slug (e.g. "gmail-fetch-emails" → "gmail",
+                    // "GMAIL_FETCH_EMAILS" → "gmail").
+                    let app_hint = args
+                        .get("app")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                        .or_else(|| derive_app_from_action(action_name));
+
+                    if let Some(ref app) = app_hint {
+                        resolved_acct = self
+                            .resolve_connected_account_id(app, entity_id)
+                            .await
+                            .unwrap_or(None);
+                        resolved_acct.as_deref()
+                    } else {
+                        resolved_acct = None;
+                        None
+                    }
+                };
 
                 match self
                     .execute_action(action_name, params, Some(entity_id), acct_ref)
@@ -538,6 +663,26 @@ impl Tool for ComposioTool {
                         success: false,
                         output: String::new(),
                         error: Some(format!("Action execution failed: {e}")),
+                    }),
+                }
+            }
+
+            "connected_accounts" => {
+                let app = args.get("app").and_then(|v| v.as_str());
+                match self.list_connected_accounts(app, entity_id).await {
+                    Ok(accounts) => {
+                        let output = serde_json::to_string_pretty(&accounts)
+                            .unwrap_or_else(|_| format!("{accounts:?}"));
+                        Ok(ToolResult {
+                            success: true,
+                            output,
+                            error: None,
+                        })
+                    }
+                    Err(e) => Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Failed to list connected accounts: {e}")),
                     }),
                 }
             }
@@ -586,10 +731,26 @@ impl Tool for ComposioTool {
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "Unknown action '{action}'. Use 'list', 'execute', or 'connect'."
+                    "Unknown action '{action}'. Use 'list', 'execute', 'connected_accounts', or 'connect'."
                 )),
             }),
         }
+    }
+}
+
+/// Derive a toolkit/app slug from an action name.
+///
+/// Examples:
+/// - `"GMAIL_FETCH_EMAILS"` → `Some("gmail")`
+/// - `"gmail-fetch-emails"` → `Some("gmail")`
+/// - `"GITHUB_LIST_REPOS"` → `Some("github")`
+fn derive_app_from_action(action_name: &str) -> Option<String> {
+    let normalized = action_name.trim().to_ascii_lowercase().replace('_', "-");
+    let app = normalized.split('-').next()?.to_string();
+    if app.is_empty() {
+        None
+    } else {
+        Some(app)
     }
 }
 
@@ -700,6 +861,32 @@ fn extract_api_error_message(body: &str) -> Option<String> {
 }
 
 // ── API response types ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ComposioConnectedAccountsResponse {
+    #[serde(default)]
+    items: Vec<ComposioConnectedAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComposioConnectedAccount {
+    pub id: String,
+    #[serde(rename = "appName", default)]
+    pub app_name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(rename = "entityId", default)]
+    pub entity_id: Option<String>,
+}
+
+impl ComposioConnectedAccount {
+    pub fn is_active(&self) -> bool {
+        self.status
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("active") || s.eq_ignore_ascii_case("connected"))
+            .unwrap_or(false)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct ComposioActionsResponse {
@@ -1116,5 +1303,190 @@ mod tests {
         assert_eq!(body["arguments"], json!({}));
         assert!(body.get("connected_account_id").is_none());
         assert!(body.get("user_id").is_none());
+    }
+
+    // ── derive_app_from_action ────────────────────────────────
+
+    #[test]
+    fn derive_app_from_uppercase_action_name() {
+        assert_eq!(
+            derive_app_from_action("GMAIL_FETCH_EMAILS").as_deref(),
+            Some("gmail")
+        );
+    }
+
+    #[test]
+    fn derive_app_from_kebab_slug() {
+        assert_eq!(
+            derive_app_from_action("gmail-fetch-emails").as_deref(),
+            Some("gmail")
+        );
+    }
+
+    #[test]
+    fn derive_app_from_github_action() {
+        assert_eq!(
+            derive_app_from_action("GITHUB_LIST_REPOS").as_deref(),
+            Some("github")
+        );
+    }
+
+    #[test]
+    fn derive_app_from_single_word() {
+        assert_eq!(derive_app_from_action("gmail").as_deref(), Some("gmail"));
+    }
+
+    #[test]
+    fn derive_app_from_empty_returns_none() {
+        assert_eq!(derive_app_from_action(""), None);
+        assert_eq!(derive_app_from_action("   "), None);
+    }
+
+    #[test]
+    fn derive_app_trims_whitespace() {
+        assert_eq!(
+            derive_app_from_action("  SLACK_SEND_MESSAGE  ").as_deref(),
+            Some("slack")
+        );
+    }
+
+    // ── ComposioConnectedAccount ──────────────────────────────
+
+    #[test]
+    fn connected_account_is_active_with_active_status() {
+        let acct = ComposioConnectedAccount {
+            id: "acct_1".into(),
+            app_name: Some("gmail".into()),
+            status: Some("active".into()),
+            entity_id: Some("default".into()),
+        };
+        assert!(acct.is_active());
+    }
+
+    #[test]
+    fn connected_account_is_active_with_connected_status() {
+        let acct = ComposioConnectedAccount {
+            id: "acct_2".into(),
+            app_name: Some("gmail".into()),
+            status: Some("connected".into()),
+            entity_id: None,
+        };
+        assert!(acct.is_active());
+    }
+
+    #[test]
+    fn connected_account_is_active_case_insensitive() {
+        let acct = ComposioConnectedAccount {
+            id: "acct_3".into(),
+            app_name: None,
+            status: Some("ACTIVE".into()),
+            entity_id: None,
+        };
+        assert!(acct.is_active());
+    }
+
+    #[test]
+    fn connected_account_not_active_with_disconnected_status() {
+        let acct = ComposioConnectedAccount {
+            id: "acct_4".into(),
+            app_name: Some("gmail".into()),
+            status: Some("disconnected".into()),
+            entity_id: None,
+        };
+        assert!(!acct.is_active());
+    }
+
+    #[test]
+    fn connected_account_not_active_with_no_status() {
+        let acct = ComposioConnectedAccount {
+            id: "acct_5".into(),
+            app_name: None,
+            status: None,
+            entity_id: None,
+        };
+        assert!(!acct.is_active());
+    }
+
+    #[test]
+    fn connected_account_deserializes_from_v3_shape() {
+        let json_str = r#"{
+            "id": "acct_abc123",
+            "appName": "gmail",
+            "status": "active",
+            "entityId": "default"
+        }"#;
+        let acct: ComposioConnectedAccount = serde_json::from_str(json_str).unwrap();
+        assert_eq!(acct.id, "acct_abc123");
+        assert_eq!(acct.app_name.as_deref(), Some("gmail"));
+        assert_eq!(acct.status.as_deref(), Some("active"));
+        assert_eq!(acct.entity_id.as_deref(), Some("default"));
+        assert!(acct.is_active());
+    }
+
+    #[test]
+    fn connected_accounts_response_deserializes_empty() {
+        let json_str = r#"{"items": []}"#;
+        let resp: ComposioConnectedAccountsResponse = serde_json::from_str(json_str).unwrap();
+        assert!(resp.items.is_empty());
+    }
+
+    #[test]
+    fn connected_accounts_response_deserializes_multiple() {
+        let json_str = r#"{
+            "items": [
+                {"id": "acct_1", "appName": "gmail", "status": "active", "entityId": "default"},
+                {"id": "acct_2", "appName": "github", "status": "disconnected", "entityId": "default"}
+            ]
+        }"#;
+        let resp: ComposioConnectedAccountsResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(resp.items.len(), 2);
+        assert!(resp.items[0].is_active());
+        assert!(!resp.items[1].is_active());
+    }
+
+    #[test]
+    fn connected_accounts_response_missing_items_defaults_empty() {
+        let json_str = r"{}";
+        let resp: ComposioConnectedAccountsResponse = serde_json::from_str(json_str).unwrap();
+        assert!(resp.items.is_empty());
+    }
+
+    // ── Schema / description ──────────────────────────────────
+
+    #[test]
+    fn schema_enum_includes_connected_accounts() {
+        let tool = ComposioTool::new("test-key", None, test_security());
+        let schema = tool.parameters_schema();
+        let action_enum = schema["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        let values: Vec<&str> = action_enum
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(values.contains(&"connected_accounts"));
+        assert!(values.contains(&"list"));
+        assert!(values.contains(&"execute"));
+        assert!(values.contains(&"connect"));
+    }
+
+    #[test]
+    fn description_mentions_connected_accounts() {
+        let tool = ComposioTool::new("test-key", None, test_security());
+        assert!(tool.description().contains("connected_accounts"));
+    }
+
+    // ── Unknown action error message ──────────────────────────
+
+    #[tokio::test]
+    async fn unknown_action_error_mentions_connected_accounts() {
+        let tool = ComposioTool::new("test-key", None, test_security());
+        let result = tool
+            .execute(json!({"action": "bogus"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("connected_accounts"), "error was: {err}");
     }
 }
