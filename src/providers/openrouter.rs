@@ -1,8 +1,9 @@
 use crate::multimodal;
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
-    Provider, ProviderCapabilities, TokenUsage, ToolCall as ProviderToolCall,
+    Provider, ProviderCapabilities, StreamChunk, StreamError, StreamOptions, StreamResult, TokenUsage, ToolCall as ProviderToolCall,
 };
+use futures::stream::{self, StreamExt};
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -17,6 +18,8 @@ struct ChatRequest {
     model: String,
     messages: Vec<Message>,
     temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -335,6 +338,7 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages,
             temperature,
+            stream: None,
         };
 
         let response = self
@@ -385,6 +389,7 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages: api_messages,
             temperature,
+            stream: None,
         };
 
         let response = self
@@ -561,6 +566,136 @@ impl Provider for OpenRouterProvider {
         result.usage = usage;
         Ok(result)
     }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn stream_chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        temperature: f64,
+        _options: StreamOptions,
+    ) -> futures::stream::BoxStream<'static, StreamResult<StreamChunk>> {
+        let credential = match self.credential.as_ref() {
+            Some(value) => value.clone(),
+            None => {
+                return stream::once(async {
+                    Err(StreamError::Provider("OpenRouter API key not set".to_string()))
+                })
+                .boxed();
+            }
+        };
+
+        let api_messages: Vec<Message> = messages
+            .iter()
+            .map(|m| Message {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages: api_messages,
+            temperature,
+            stream: Some(true),
+        };
+
+        let client = self.http_client();
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+
+        tokio::spawn(async move {
+            let response = match client
+                .post("https://openrouter.ai/api/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", credential))
+                .header("Accept", "text/event-stream")
+                .json(&request)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Err(StreamError::Http(e))).await;
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error = response.text().await.unwrap_or_else(|_| format!("HTTP {}", status));
+                let _ = tx
+                    .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
+                    .await;
+                return;
+            }
+
+            // Parse SSE stream
+            let mut bytes_stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(item) = bytes_stream.next().await {
+                match item {
+                    Ok(bytes) => {
+                        let text = match String::from_utf8(bytes.to_vec()) {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
+                        buffer.push_str(&text);
+
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer[..=pos].to_string();
+                            buffer = buffer[pos + 1..].to_string();
+                            let line = line.trim();
+
+                            if line.is_empty() || line.starts_with(':') {
+                                continue;
+                            }
+
+                            if let Some(data) = line.strip_prefix("data:") {
+                                let data = data.trim();
+                                if data == "[DONE]" {
+                                    continue;
+                                }
+
+                                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                                    if let Some(delta) = chunk
+                                        .get("choices")
+                                        .and_then(|c| c.get(0))
+                                        .and_then(|c| c.get("delta"))
+                                        .and_then(|d| d.get("content"))
+                                        .and_then(|c| c.as_str())
+                                    {
+                                        if !delta.is_empty() {
+                                            if tx
+                                                .send(Ok(StreamChunk::delta(delta)))
+                                                .await
+                                                .is_err()
+                                            {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(StreamError::Http(e))).await;
+                        break;
+                    }
+                }
+            }
+
+            let _ = tx.send(Ok(StreamChunk::final_chunk())).await;
+        });
+
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|chunk| (chunk, rx))
+        })
+        .boxed()
+    }
 }
 
 #[cfg(test)]
@@ -646,6 +781,7 @@ mod tests {
                 },
             ],
             temperature: 0.5,
+            stream: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -679,6 +815,7 @@ mod tests {
                 })
                 .collect(),
             temperature: 0.0,
+            stream: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
