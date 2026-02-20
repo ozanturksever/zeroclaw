@@ -271,6 +271,16 @@ impl ServiceHandler for ZeroClawEdgeService {
     }
 
     async fn handle_request(&self, method: &str, req_data: &[u8]) -> dink_sdk::Result<Vec<u8>> {
+        // Dink SDK wraps request in {"metadata":...,"payload":...} envelope.
+        // Extract the inner payload for deserialization.
+        let req_data = match serde_json::from_slice::<serde_json::Value>(req_data) {
+            Ok(serde_json::Value::Object(ref m)) if m.contains_key("payload") => {
+                serde_json::to_vec(m.get("payload").unwrap()).unwrap_or_else(|_| req_data.to_vec())
+            }
+            _ => req_data.to_vec(),
+        };
+        let req_data = req_data.as_slice();
+        tracing::debug!(method = method, raw_len = req_data.len(), "handle_request");
         match method {
             "SendMessage" => {
                 let req: ZcSendMessageRequest = serde_json::from_slice(req_data)
