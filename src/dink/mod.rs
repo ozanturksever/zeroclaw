@@ -72,8 +72,6 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
     runtime.expose_service(edge_service.clone()).await?;
     tracing::info!("Dink listener started \u{2014} ZeroClawService exposed, awaiting messages");
 
-    // Start minimal health HTTP server for OOSS sandbox health checks (port 9468)
-    tokio::spawn(start_health_server());
     let mut agent = crate::agent::Agent::from_config(config)?;
     // Share the agent's memory with the edge service for RecallMemory RPC
     edge_service.set_memory(agent.memory_ref().clone()).await;
@@ -126,7 +124,7 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
 
 /// Minimal HTTP health server for OOSS sandbox health checks.
 /// Responds to GET /v1/health with 200 OK.
-async fn start_health_server() {
+pub async fn start_health_server() {
     use axum::{routing::get, Router};
     let port: u16 = std::env::var("OOSS_HEALTH_PORT")
         .unwrap_or_else(|_| "9468".to_string())
