@@ -125,6 +125,40 @@ fn dink_err(msg: impl Into<String>) -> DinkError {
     }
 }
 
+/// Get current process RSS in MB (platform-specific).
+fn get_process_memory_mb() -> f64 {
+    // Linux: read from /proc/self/status
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+            for line in contents.lines() {
+                if let Some(val) = line.strip_prefix("VmRSS:") {
+                    let kb_str = val.trim().trim_end_matches(" kB").trim();
+                    if let Ok(kb) = kb_str.parse::<u64>() {
+                        return kb as f64 / 1024.0;
+                    }
+                }
+            }
+        }
+    }
+    // macOS: use `ps` as fallback (no libc dependency)
+    #[cfg(target_os = "macos")]
+    {
+        let pid = std::process::id();
+        if let Ok(output) = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+        {
+            if let Ok(rss_str) = String::from_utf8(output.stdout) {
+                if let Ok(kb) = rss_str.trim().parse::<u64>() {
+                    return kb as f64 / 1024.0;
+                }
+            }
+        }
+    }
+    0.0
+}
+
 /// Exposes a ZeroClaw agent as a `"ZeroClawService"` on the Dink edge mesh.
 ///
 /// Create via [`ZeroClawEdgeService::new`] which returns both the handler
@@ -135,6 +169,9 @@ pub struct ZeroClawEdgeService {
     status: Arc<RwLock<InstanceStatus>>,
     memory: Arc<RwLock<Option<Arc<dyn crate::memory::Memory>>>>,
     config_tx: tokio::sync::mpsc::Sender<crate::agent::RuntimeConfigUpdate>,
+    started_at: std::time::Instant,
+    messages_handled: std::sync::atomic::AtomicI32,
+    tool_calls_total: std::sync::atomic::AtomicI32,
 }
 
 impl ZeroClawEdgeService {
@@ -157,6 +194,9 @@ impl ZeroClawEdgeService {
             })),
             memory: Arc::new(RwLock::new(None)),
             config_tx,
+            started_at: std::time::Instant::now(),
+            messages_handled: std::sync::atomic::AtomicI32::new(0),
+            tool_calls_total: std::sync::atomic::AtomicI32::new(0),
         };
         (service, rx, config_rx)
     }
@@ -207,6 +247,8 @@ impl ZeroClawEdgeService {
             .map_err(|_| dink_err("agent response channel dropped"))?
             .map_err(|e| dink_err(format!("agent error: {e}")))?;
 
+        self.messages_handled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.tool_calls_total.fetch_add(resp.tool_calls.len() as i32, std::sync::atomic::Ordering::Relaxed);
         Ok(resp)
     }
 }
@@ -249,12 +291,18 @@ impl ServiceHandler for ZeroClawEdgeService {
 
             "GetStatus" => {
                 let status = self.status.read().await;
+                let uptime = self.started_at.elapsed().as_secs() as i64;
+                let msgs = self.messages_handled.load(std::sync::atomic::Ordering::Relaxed);
+                let tools = self.tool_calls_total.load(std::sync::atomic::Ordering::Relaxed);
+
+                // Approximate RSS from /proc or sysctl
+                let memory_mb = get_process_memory_mb();
                 let resp = ZcGetStatusResponse {
                     status: status.status.clone(),
-                    memory_mb: status.memory_mb,
-                    uptime_seconds: status.uptime_seconds,
-                    messages_handled: status.messages_handled,
-                    tool_calls_total: status.tool_calls_total,
+                    memory_mb,
+                    uptime_seconds: uptime,
+                    messages_handled: msgs,
+                    tool_calls_total: tools,
                 };
                 serde_json::to_vec(&resp)
                     .map_err(|e| dink_err(format!("serialization error: {e}")))
@@ -265,6 +313,12 @@ impl ServiceHandler for ZeroClawEdgeService {
                     let mut status = self.status.write().await;
                     status.status = "stopping".to_string();
                 }
+                // Close the agent channel to signal shutdown
+                {
+                    let mut sender = self.agent_sender.write().await;
+                    *sender = None;
+                }
+                tracing::info!("Shutdown RPC received — agent channel closed");
                 let resp = ZcShutdownResponse {
                     acknowledged: true,
                 };
@@ -395,6 +449,7 @@ impl ServiceHandler for ZeroClawEdgeService {
                 .map_err(|_| dink_err("agent response channel dropped"))?
                 .map_err(|e| dink_err(format!("agent error: {e}")))?;
                 tracing::info!("StreamMessage: complete");
+                self.messages_handled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Small delay to let the last emit task flush to NATS before
                 // the edge SDK publishes the .done signal that closes the client subscription.
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;

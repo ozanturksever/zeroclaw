@@ -74,6 +74,13 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
     let mut agent = crate::agent::Agent::from_config(config)?;
     // Share the agent's memory with the edge service for RecallMemory RPC
     edge_service.set_memory(agent.memory_ref().clone()).await;
+
+    // Mark as running
+    edge_service.update_status(edge_service::InstanceStatus {
+        status: "running".to_string(),
+        ..Default::default()
+    }).await;
+
     loop {
         tokio::select! {
             Some(req) = agent_rx.recv() => {
