@@ -753,7 +753,7 @@ impl Agent {
         while let Some(msg) = rx.recv().await {
             let response = match self.turn(&msg.content).await {
                 Ok(resp) => resp,
-                Err(e) => {
+                Err(_e) => {
                     continue;
                 }
             };
