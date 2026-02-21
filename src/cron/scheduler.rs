@@ -307,7 +307,8 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
                 tg.bot_token.clone(),
                 tg.allowed_users.clone(),
                 tg.mention_only,
-            );
+            )
+            .await;
             channel.send(&SendMessage::new(output, target)).await?;
         }
         "discord" => {

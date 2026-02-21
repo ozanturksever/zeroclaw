@@ -69,7 +69,9 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
 
     let (edge_service, mut agent_rx, mut config_rx) = ZeroClawEdgeService::new();
     let edge_service = Arc::new(edge_service);
-    runtime.expose_service(edge_service.clone()).await?;
+    // Wrap in generated handler for dispatch + envelope unwrap
+    let handler = Arc::new(generated::ZeroClawServiceHandler::new(edge_service.clone()));
+    runtime.expose_service(handler).await?;
     tracing::info!("Dink listener started \u{2014} ZeroClawService exposed, awaiting messages");
 
     let mut agent = crate::agent::Agent::from_config(config)?;

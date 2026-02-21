@@ -570,7 +570,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     println!("  GET  /ws/chat   — WebSocket agent chat");
     println!("  GET  /health    — health check");
     println!("  GET  /metrics   — Prometheus metrics");
-    if let Some(code) = pairing.pairing_code() {
+    if let Some(code) = pairing.pairing_code().await {
         println!();
         println!("  🔐 PAIRING REQUIRED — use this one-time code:");
         println!("     ┌──────────────┐");
@@ -688,7 +688,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let body = serde_json::json!({
         "status": "ok",
-        "paired": state.pairing.is_paired(),
+        "paired": state.pairing.is_paired().await,
         "runtime": crate::health::snapshot_json(),
     });
     Json(body)
@@ -781,9 +781,7 @@ async fn handle_pair(
 }
 
 async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGuard) -> Result<()> {
-    let paired_tokens = pairing.tokens();
-    // This is needed because parking_lot's guard is not Send so we clone the inner
-    // this should be removed once async mutexes are used everywhere
+    let paired_tokens = pairing.tokens().await;
     let mut updated_cfg = { config.lock().clone() };
     updated_cfg.gateway.paired_tokens = paired_tokens;
     updated_cfg
@@ -865,7 +863,7 @@ async fn handle_webhook(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let token = auth.strip_prefix("Bearer ").unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
+        if !state.pairing.is_authenticated(token).await {
             tracing::warn!("Webhook: rejected — not paired / invalid bearer token");
             let err = serde_json::json!({
                 "error": "Unauthorized — pair first via POST /pair, then send Authorization: Bearer <token>"
@@ -1681,9 +1679,9 @@ mod tests {
         config.save().await.unwrap();
 
         let guard = PairingGuard::new(true, &[]);
-        let code = guard.pairing_code().unwrap();
+        let code = guard.pairing_code().await.unwrap();
         let token = guard.try_pair(&code, "test_client").await.unwrap().unwrap();
-        assert!(guard.is_authenticated(&token));
+        assert!(guard.is_authenticated(&token).await);
 
         let shared_config = Arc::new(Mutex::new(config));
         persist_pairing_tokens(shared_config.clone(), &guard)

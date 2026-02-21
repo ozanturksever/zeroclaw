@@ -1,15 +1,20 @@
 //! Exposes a ZeroClaw agent instance as a callable Dink edge service.
 //!
 //! The OOSS platform communicates with running ZeroClaw instances through
-//! `ZeroClawEdgeService`, which implements `dink_sdk::ServiceHandler`.
-//! Incoming RPC calls are forwarded to the agent loop via an mpsc channel.
+//! `ZeroClawEdgeService`, which implements the generated `ZeroClawServiceServer`
+//! trait. Incoming RPC calls are forwarded to the agent loop via an mpsc channel.
 
 use async_trait::async_trait;
-use dink_sdk::{DinkError, ServiceDefinition, ServiceHandler};
-use serde::{Deserialize, Serialize};
+use dink_sdk::{DinkError, Result as DinkResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use super::generated::{
+    GetStatusRequest, GetStatusResponse, MemoryEntry, RecallMemoryRequest, RecallMemoryResponse,
+    SendMessageRequest, SendMessageResponse, ShutdownRequest, ShutdownResponse, ToolCallRecord,
+    UpdateConfigRequest, UpdateConfigResponse, ZeroClawServiceServer,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -26,15 +31,15 @@ pub struct AgentRequest {
 }
 
 /// The agent loop's response to a forwarded request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentResponse {
     pub response: String,
-    pub tool_calls: Vec<super::generated::ToolCallRecord>,
+    pub tool_calls: Vec<ToolCallRecord>,
     pub iterations: i32,
 }
 
 /// Snapshot of agent instance health/activity metrics.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct InstanceStatus {
     pub status: String,
     pub memory_mb: f64,
@@ -44,76 +49,7 @@ pub struct InstanceStatus {
 }
 
 // ---------------------------------------------------------------------------
-// RPC request/response envelopes (JSON-over-NATS)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct ZcSendMessageRequest {
-    message: String,
-    #[serde(default)]
-    channel: String,
-    #[serde(default)]
-    metadata: HashMap<String, String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ZcSendMessageResponse {
-    response: String,
-    tool_calls: Vec<super::generated::ToolCallRecord>,
-    iterations: i32,
-}
-
-#[derive(Debug, Serialize)]
-struct ZcGetStatusResponse {
-    status: String,
-    memory_mb: f64,
-    uptime_seconds: i64,
-    messages_handled: i32,
-    tool_calls_total: i32,
-}
-
-#[derive(Debug, Serialize)]
-struct ZcShutdownResponse {
-    acknowledged: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ZcRecallMemoryRequest {
-    query: String,
-    #[serde(default = "default_recall_limit")]
-    limit: i32,
-}
-
-fn default_recall_limit() -> i32 { 10 }
-
-#[derive(Debug, Serialize)]
-struct ZcRecallMemoryResponse {
-    memories: Vec<serde_json::Value>,
-    total: i32,
-}
-
-#[derive(Debug, Deserialize)]
-struct ZcUpdateConfigRequest {
-    #[serde(default)]
-    config: HashMap<String, serde_json::Value>,
-    #[serde(default)]
-    restart: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct ZcUpdateConfigResponse {
-    applied: bool,
-    restart_scheduled: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct ZcStreamEvent {
-    event_type: String,
-    data: serde_json::Value,
-}
-
-// ---------------------------------------------------------------------------
-// Service implementation
+// Helpers
 // ---------------------------------------------------------------------------
 
 fn dink_err(msg: impl Into<String>) -> DinkError {
@@ -127,7 +63,6 @@ fn dink_err(msg: impl Into<String>) -> DinkError {
 
 /// Get current process RSS in MB (platform-specific).
 fn get_process_memory_mb() -> f64 {
-    // Linux: read from /proc/self/status
     #[cfg(target_os = "linux")]
     {
         if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
@@ -141,7 +76,6 @@ fn get_process_memory_mb() -> f64 {
             }
         }
     }
-    // macOS: use `ps` as fallback (no libc dependency)
     #[cfg(target_os = "macos")]
     {
         let pid = std::process::id();
@@ -159,11 +93,15 @@ fn get_process_memory_mb() -> f64 {
     0.0
 }
 
+// ---------------------------------------------------------------------------
+// Service implementation
+// ---------------------------------------------------------------------------
+
 /// Exposes a ZeroClaw agent as a `"ZeroClawService"` on the Dink edge mesh.
 ///
-/// Create via [`ZeroClawEdgeService::new`] which returns both the handler
-/// (for `EdgeClient::expose_service`) and a receiver channel (for the agent
-/// loop to consume incoming messages).
+/// Create via [`ZeroClawEdgeService::new`] which returns both the service
+/// (for wrapping with `ZeroClawServiceHandler`) and a receiver channel (for
+/// the agent loop to consume incoming messages).
 pub struct ZeroClawEdgeService {
     agent_sender: Arc<RwLock<Option<tokio::sync::mpsc::Sender<AgentRequest>>>>,
     status: Arc<RwLock<InstanceStatus>>,
@@ -222,7 +160,7 @@ impl ZeroClawEdgeService {
         message: String,
         channel: String,
         metadata: HashMap<String, String>,
-    ) -> dink_sdk::Result<AgentResponse> {
+    ) -> DinkResult<AgentResponse> {
         let sender_guard = self.agent_sender.read().await;
         let sender = sender_guard
             .as_ref()
@@ -254,221 +192,206 @@ impl ZeroClawEdgeService {
 }
 
 #[async_trait]
-impl ServiceHandler for ZeroClawEdgeService {
-    fn definition(&self) -> ServiceDefinition {
-        ServiceDefinition {
-            name: "ZeroClawService",
-            version: "1.0.0",
-            methods: &[
-                "SendMessage",
-                "StreamMessage",
-                "GetStatus",
-                "RecallMemory",
-                "UpdateConfig",
-                "Shutdown",
-            ],
-        }
+impl ZeroClawServiceServer for ZeroClawEdgeService {
+    async fn send_message(&self, req: SendMessageRequest) -> DinkResult<SendMessageResponse> {
+        let agent_resp = self
+            .send_to_agent(req.message, req.session_id.clone(), req.context)
+            .await?;
+
+        Ok(SendMessageResponse {
+            response: agent_resp.response,
+            session_id: req.session_id,
+            tool_calls: agent_resp.tool_calls,
+            duration_ms: 0,
+            metadata: HashMap::new(),
+        })
     }
 
-    async fn handle_request(&self, method: &str, req_data: &[u8]) -> dink_sdk::Result<Vec<u8>> {
-        // Dink SDK wraps request in {"metadata":...,"payload":...} envelope.
-        // Extract the inner payload for deserialization.
-        let req_data = match serde_json::from_slice::<serde_json::Value>(req_data) {
-            Ok(serde_json::Value::Object(ref m)) if m.contains_key("payload") => {
-                serde_json::to_vec(m.get("payload").unwrap()).unwrap_or_else(|_| req_data.to_vec())
-            }
-            _ => req_data.to_vec(),
-        };
-        let req_data = req_data.as_slice();
-        tracing::debug!(method = method, raw_len = req_data.len(), "handle_request");
-        match method {
-            "SendMessage" => {
-                let req: ZcSendMessageRequest = serde_json::from_slice(req_data)
-                    .map_err(|e| dink_err(format!("malformed SendMessage request: {e}")))?;
-
-                let agent_resp = self
-                    .send_to_agent(req.message, req.channel, req.metadata)
-                    .await?;
-
-                let resp = ZcSendMessageResponse {
-                    response: agent_resp.response,
-                    tool_calls: agent_resp.tool_calls,
-                    iterations: agent_resp.iterations,
-                };
-                serde_json::to_vec(&resp)
-                    .map_err(|e| dink_err(format!("serialization error: {e}")))
-            }
-
-            "GetStatus" => {
-                let status = self.status.read().await;
-                let uptime = self.started_at.elapsed().as_secs() as i64;
-                let msgs = self.messages_handled.load(std::sync::atomic::Ordering::Relaxed);
-                let tools = self.tool_calls_total.load(std::sync::atomic::Ordering::Relaxed);
-
-                // Approximate RSS from /proc or sysctl
-                let memory_mb = get_process_memory_mb();
-                let resp = ZcGetStatusResponse {
-                    status: status.status.clone(),
-                    memory_mb,
-                    uptime_seconds: uptime,
-                    messages_handled: msgs,
-                    tool_calls_total: tools,
-                };
-                serde_json::to_vec(&resp)
-                    .map_err(|e| dink_err(format!("serialization error: {e}")))
-            }
-
-            "Shutdown" => {
-                {
-                    let mut status = self.status.write().await;
-                    status.status = "stopping".to_string();
-                }
-                // Close the agent channel to signal shutdown
-                {
-                    let mut sender = self.agent_sender.write().await;
-                    *sender = None;
-                }
-                tracing::info!("Shutdown RPC received — agent channel closed");
-                let resp = ZcShutdownResponse {
-                    acknowledged: true,
-                };
-                serde_json::to_vec(&resp)
-                    .map_err(|e| dink_err(format!("serialization error: {e}")))
-            }
-
-            "RecallMemory" => {
-                let req: ZcRecallMemoryRequest = serde_json::from_slice(req_data)
-                    .map_err(|e| dink_err(format!("malformed RecallMemory request: {e}")))?;
-
-                let memory_guard = self.memory.read().await;
-                let entries = if let Some(mem) = memory_guard.as_ref() {
-                    let limit = if req.limit > 0 { req.limit as usize } else { 10 };
-                    mem.recall(&req.query, limit, None)
-                        .await
-                        .unwrap_or_default()
-                } else {
-                    vec![]
-                };
-
-                let total = entries.len() as i32;
-                let memories: Vec<serde_json::Value> = entries
-                    .into_iter()
-                    .map(|e| serde_json::json!({
-                        "id": e.id,
-                        "key": e.key,
-                        "content": e.content,
-                        "category": e.category.to_string(),
-                        "timestamp": e.timestamp,
-                        "score": e.score,
-                    }))
-                    .collect();
-
-                let resp = ZcRecallMemoryResponse { memories, total };
-                serde_json::to_vec(&resp)
-                    .map_err(|e| dink_err(format!("serialization error: {e}")))
-            }
-
-            "UpdateConfig" => {
-                let req: ZcUpdateConfigRequest = serde_json::from_slice(req_data)
-                    .map_err(|e| dink_err(format!("malformed UpdateConfig request: {e}")))?;
-                tracing::info!(keys = ?req.config.keys().collect::<Vec<_>>(), restart = req.restart, "UpdateConfig RPC received");
-
-                // Build a RuntimeConfigUpdate from the JSON payload
-                let mut update = crate::agent::RuntimeConfigUpdate::default();
-                if let Some(model) = req.config.get("model").and_then(|v| v.as_str()) {
-                    update.model = Some(model.to_string());
-                }
-                if let Some(temp) = req.config.get("temperature").and_then(|v| v.as_f64()) {
-                    update.temperature = Some(temp);
-                }
-                if let Some(max_iter) = req.config.get("max_tool_iterations").and_then(|v| v.as_u64()) {
-                    update.max_tool_iterations = Some(max_iter as usize);
-                }
-                if let Some(auto_save) = req.config.get("auto_save").and_then(|v| v.as_bool()) {
-                    update.auto_save = Some(auto_save);
-                }
-
-                let applied = update.model.is_some()
-                    || update.temperature.is_some()
-                    || update.max_tool_iterations.is_some()
-                    || update.auto_save.is_some();
-
-                if applied {
-                    let _ = self.config_tx.send(update).await;
-                }
-                let resp = ZcUpdateConfigResponse {
-                    applied,
-                    restart_scheduled: req.restart,
-                };
-                serde_json::to_vec(&resp)
-                    .map_err(|e| dink_err(format!("serialization error: {e}")))
-            }
-
-            other => Err(dink_err(format!("unknown method: {other}")))
-        }
-    }
-
-    async fn handle_stream(
+    async fn stream_message(
         &self,
-        method: &str,
-        req_data: &[u8],
-        emit: Box<dyn Fn(Vec<u8>) -> dink_sdk::Result<()> + Send + Sync>,
-    ) -> dink_sdk::Result<()> {
-        match method {
-            "StreamMessage" => {
-                let req: ZcSendMessageRequest = serde_json::from_slice(req_data)
-                    .map_err(|e| dink_err(format!("malformed StreamMessage request: {e}")))?;
-                tracing::info!(channel = %req.channel, "StreamMessage: starting");
+        req: SendMessageRequest,
+        emit: Box<dyn Fn(Vec<u8>) -> DinkResult<()> + Send + Sync>,
+    ) -> DinkResult<()> {
+        tracing::info!(session = %req.session_id, "StreamMessage: starting");
 
-                let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(128);
-                let sender_guard = self.agent_sender.read().await;
-                let sender = sender_guard
-                    .as_ref()
-                    .ok_or_else(|| dink_err("agent not started"))?;
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(128);
+        let sender_guard = self.agent_sender.read().await;
+        let sender = sender_guard
+            .as_ref()
+            .ok_or_else(|| dink_err("agent not started"))?;
 
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                sender
-                    .send(AgentRequest {
-                        message: req.message,
-                        channel: req.channel,
-                        metadata: req.metadata,
-                        response_tx,
-                        stream_delta_tx: Some(delta_tx),
-                    })
-                    .await
-                    .map_err(|_| dink_err("agent channel closed"))?;
-                tracing::debug!("StreamMessage: request sent to agent, awaiting deltas");
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        sender
+            .send(AgentRequest {
+                message: req.message,
+                channel: req.session_id,
+                metadata: req.context,
+                response_tx,
+                stream_delta_tx: Some(delta_tx),
+            })
+            .await
+            .map_err(|_| dink_err("agent channel closed"))?;
+        tracing::debug!("StreamMessage: request sent to agent, awaiting deltas");
 
-                let mut event_count = 0u32;
-                while let Some(event_value) = delta_rx.recv().await {
-                    event_count += 1;
-                    let event_type = event_value.get("event_type").and_then(|v| v.as_str()).unwrap_or("?");
-                    tracing::debug!(event_count, event_type, "StreamMessage: emitting event");
-                    let bytes = serde_json::to_vec(&event_value)
-                        .map_err(|e| dink_err(format!("serialization error: {e}")))?;
-                    emit(bytes)?;
-                }
-
-                tracing::info!(event_count, "StreamMessage: delta channel closed, awaiting final response");
-                let _resp = tokio::time::timeout(
-                    std::time::Duration::from_secs(120),
-                    response_rx,
-                )
-                .await
-                .map_err(|_| dink_err("stream response timed out"))?
-                .map_err(|_| dink_err("agent response channel dropped"))?
-                .map_err(|e| dink_err(format!("agent error: {e}")))?;
-                tracing::info!("StreamMessage: complete");
-                self.messages_handled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Small delay to let the last emit task flush to NATS before
-                // the edge SDK publishes the .done signal that closes the client subscription.
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                Ok(())
-            }
-
-            other => Err(dink_err(format!(
-                "streaming not supported for method: {other}"
-            ))),
+        let mut event_count = 0u32;
+        while let Some(event_value) = delta_rx.recv().await {
+            event_count += 1;
+            let event_type = event_value.get("event_type").and_then(|v| v.as_str()).unwrap_or("?");
+            tracing::debug!(event_count, event_type, "StreamMessage: emitting event");
+            let bytes = serde_json::to_vec(&event_value)
+                .map_err(|e| dink_err(format!("serialization error: {e}")))?;
+            emit(bytes)?;
         }
+
+        tracing::info!(event_count, "StreamMessage: delta channel closed, awaiting final response");
+        let _resp = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            response_rx,
+        )
+        .await
+        .map_err(|_| dink_err("stream response timed out"))?
+        .map_err(|_| dink_err("agent response channel dropped"))?
+        .map_err(|e| dink_err(format!("agent error: {e}")))?;
+        tracing::info!("StreamMessage: complete");
+        self.messages_handled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Small delay to let the last emit task flush to NATS before
+        // the edge SDK publishes the .done signal that closes the client subscription.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(())
+    }
+
+    async fn get_status(&self, _req: GetStatusRequest) -> DinkResult<GetStatusResponse> {
+        let status = self.status.read().await;
+        let uptime_ms = self.started_at.elapsed().as_millis() as i64;
+        let msgs = self.messages_handled.load(std::sync::atomic::Ordering::Relaxed);
+        let tools = self.tool_calls_total.load(std::sync::atomic::Ordering::Relaxed);
+        let memory_bytes = (get_process_memory_mb() * 1024.0 * 1024.0) as i64;
+
+        Ok(GetStatusResponse {
+            session_id: String::new(),
+            status: status.status.clone(),
+            model: String::new(),
+            uptime_ms,
+            messages_processed: msgs,
+            tool_calls_made: tools,
+            memory_usage_bytes: memory_bytes,
+            config: HashMap::new(),
+            metadata: HashMap::new(),
+        })
+    }
+
+    async fn recall_memory(&self, req: RecallMemoryRequest) -> DinkResult<RecallMemoryResponse> {
+        let memory_guard = self.memory.read().await;
+        let entries = if let Some(mem) = memory_guard.as_ref() {
+            let limit = if req.limit > 0 { req.limit as usize } else { 10 };
+            mem.recall(&req.query, limit, None)
+                .await
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let total = entries.len() as i32;
+        let proto_entries: Vec<MemoryEntry> = entries
+            .into_iter()
+            .map(|e| MemoryEntry {
+                id: e.id,
+                content: e.content,
+                relevance: e.score.unwrap_or(0.0) as f32,
+                timestamp: e.timestamp.parse::<i64>().unwrap_or(0),
+                tags: vec![e.category.to_string()],
+                metadata: HashMap::new(),
+            })
+            .collect();
+
+        Ok(RecallMemoryResponse {
+            entries: proto_entries,
+            total_matches: total,
+        })
+    }
+
+    async fn update_config(&self, req: UpdateConfigRequest) -> DinkResult<UpdateConfigResponse> {
+        tracing::info!(keys = ?req.config.keys().collect::<Vec<_>>(), restart = req.restart, "UpdateConfig RPC received");
+
+        let mut update = crate::agent::RuntimeConfigUpdate::default();
+        if let Some(model) = req.config.get("model") {
+            update.model = Some(model.to_string());
+        }
+        if let Some(temp) = req.config.get("temperature") {
+            if let Ok(t) = temp.parse::<f64>() {
+                update.temperature = Some(t);
+            }
+        }
+        if let Some(max_iter) = req.config.get("max_tool_iterations") {
+            if let Ok(m) = max_iter.parse::<usize>() {
+                update.max_tool_iterations = Some(m);
+            }
+        }
+        if let Some(auto_save) = req.config.get("auto_save") {
+            if let Ok(a) = auto_save.parse::<bool>() {
+                update.auto_save = Some(a);
+            }
+        }
+
+        let applied = update.model.is_some()
+            || update.temperature.is_some()
+            || update.max_tool_iterations.is_some()
+            || update.auto_save.is_some();
+
+        if applied {
+            let _ = self.config_tx.send(update).await;
+        }
+        Ok(UpdateConfigResponse {
+            applied,
+            effective_config: HashMap::new(),
+            restart_required: req.restart,
+        })
+    }
+
+    async fn shutdown(&self, _req: ShutdownRequest) -> DinkResult<ShutdownResponse> {
+        {
+            let mut status = self.status.write().await;
+            status.status = "stopping".to_string();
+        }
+        {
+            let mut sender = self.agent_sender.write().await;
+            *sender = None;
+        }
+        tracing::info!("Shutdown RPC received — agent channel closed");
+        let msgs = self.messages_handled.load(std::sync::atomic::Ordering::Relaxed);
+        let uptime_ms = self.started_at.elapsed().as_millis() as i64;
+        Ok(ShutdownResponse {
+            shutdown: true,
+            messages_processed: msgs,
+            uptime_ms,
+        })
+    }
+}
+
+// Delegation for Arc<ZeroClawEdgeService> so it can be shared while
+// the ZeroClawServiceHandler owns one clone.
+#[async_trait]
+impl ZeroClawServiceServer for Arc<ZeroClawEdgeService> {
+    async fn send_message(&self, req: SendMessageRequest) -> DinkResult<SendMessageResponse> {
+        (**self).send_message(req).await
+    }
+    async fn stream_message(
+        &self,
+        req: SendMessageRequest,
+        emit: Box<dyn Fn(Vec<u8>) -> DinkResult<()> + Send + Sync>,
+    ) -> DinkResult<()> {
+        (**self).stream_message(req, emit).await
+    }
+    async fn get_status(&self, req: GetStatusRequest) -> DinkResult<GetStatusResponse> {
+        (**self).get_status(req).await
+    }
+    async fn recall_memory(&self, req: RecallMemoryRequest) -> DinkResult<RecallMemoryResponse> {
+        (**self).recall_memory(req).await
+    }
+    async fn update_config(&self, req: UpdateConfigRequest) -> DinkResult<UpdateConfigResponse> {
+        (**self).update_config(req).await
+    }
+    async fn shutdown(&self, req: ShutdownRequest) -> DinkResult<ShutdownResponse> {
+        (**self).shutdown(req).await
     }
 }

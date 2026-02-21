@@ -8,11 +8,11 @@
 // Already-paired tokens are persisted in config so restarts don't require
 // re-pairing.
 
-use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Mutex;
 
 /// Maximum failed pairing attempts before lockout.
 const MAX_PAIR_ATTEMPTS: u32 = 5;
@@ -29,7 +29,6 @@ type FailedAttempts = HashMap<String, (u32, Option<Instant>)>;
 /// Bearer tokens are stored as SHA-256 hashes to prevent plaintext exposure
 /// in config files. When a new token is generated, the plaintext is returned
 /// to the client once, and only the hash is retained.
-// TODO: I've just made this work with parking_lot but it should use either flume or tokio's async mutexes
 #[derive(Debug, Clone)]
 pub struct PairingGuard {
     /// Whether pairing is required at all.
@@ -76,8 +75,8 @@ impl PairingGuard {
     }
 
     /// The one-time pairing code (only set when no tokens exist yet).
-    pub fn pairing_code(&self) -> Option<String> {
-        self.pairing_code.lock().clone()
+    pub async fn pairing_code(&self) -> Option<String> {
+        self.pairing_code.lock().await.clone()
     }
 
     /// Whether pairing is required at all.
@@ -85,10 +84,13 @@ impl PairingGuard {
         self.require_pairing
     }
 
-    fn try_pair_blocking(&self, code: &str, client_id: &str) -> Result<Option<String>, u64> {
+    /// Attempt to pair with the given code. Returns a bearer token on success.
+    /// Returns `Err(lockout_seconds)` if locked out due to brute force.
+    /// `client_id` identifies the client for per-client lockout accounting.
+    pub async fn try_pair(&self, code: &str, client_id: &str) -> Result<Option<String>, u64> {
         // Check brute force lockout for this specific client
         {
-            let attempts = self.failed_attempts.lock();
+            let attempts = self.failed_attempts.lock().await;
             if let Some((count, Some(locked_at))) = attempts.get(client_id) {
                 if *count >= MAX_PAIR_ATTEMPTS {
                     let elapsed = locked_at.elapsed().as_secs();
@@ -100,16 +102,16 @@ impl PairingGuard {
         }
 
         {
-            let mut pairing_code = self.pairing_code.lock();
+            let mut pairing_code = self.pairing_code.lock().await;
             if let Some(ref expected) = *pairing_code {
                 if constant_time_eq(code.trim(), expected.trim()) {
                     // Reset failed attempts for this client on success
                     {
-                        let mut attempts = self.failed_attempts.lock();
+                        let mut attempts = self.failed_attempts.lock().await;
                         attempts.remove(client_id);
                     }
                     let token = generate_token();
-                    let mut tokens = self.paired_tokens.lock();
+                    let mut tokens = self.paired_tokens.lock().await;
                     tokens.insert(hash_token(&token));
 
                     // Consume the pairing code so it cannot be reused
@@ -122,7 +124,7 @@ impl PairingGuard {
 
         // Increment failed attempts for this client
         {
-            let mut attempts = self.failed_attempts.lock();
+            let mut attempts = self.failed_attempts.lock().await;
 
             // Evict expired entries when approaching the bound
             if attempts.len() >= MAX_TRACKED_CLIENTS {
@@ -149,40 +151,26 @@ impl PairingGuard {
         Ok(None)
     }
 
-    /// Attempt to pair with the given code. Returns a bearer token on success.
-    /// Returns `Err(lockout_seconds)` if locked out due to brute force.
-    /// `client_id` identifies the client for per-client lockout accounting.
-    pub async fn try_pair(&self, code: &str, client_id: &str) -> Result<Option<String>, u64> {
-        let this = self.clone();
-        let code = code.to_string();
-        let client_id = client_id.to_string();
-        // TODO: make this function the main one without spawning a task
-        let handle = tokio::task::spawn_blocking(move || this.try_pair_blocking(&code, &client_id));
-
-        handle
-            .await
-            .expect("failed to spawn blocking task this should not happen")
-    }
 
     /// Check if a bearer token is valid (compares against stored hashes).
-    pub fn is_authenticated(&self, token: &str) -> bool {
+    pub async fn is_authenticated(&self, token: &str) -> bool {
         if !self.require_pairing {
             return true;
         }
         let hashed = hash_token(token);
-        let tokens = self.paired_tokens.lock();
+        let tokens = self.paired_tokens.lock().await;
         tokens.contains(&hashed)
     }
 
     /// Returns true if the gateway is already paired (has at least one token).
-    pub fn is_paired(&self) -> bool {
-        let tokens = self.paired_tokens.lock();
+    pub async fn is_paired(&self) -> bool {
+        let tokens = self.paired_tokens.lock().await;
         !tokens.is_empty()
     }
 
     /// Get all paired token hashes (for persisting to config).
-    pub fn tokens(&self) -> Vec<String> {
-        let tokens = self.paired_tokens.lock();
+    pub async fn tokens(&self) -> Vec<String> {
+        let tokens = self.paired_tokens.lock().await;
         tokens.iter().cloned().collect()
     }
 }
@@ -274,31 +262,31 @@ mod tests {
     #[test]
     async fn new_guard_generates_code_when_no_tokens() {
         let guard = PairingGuard::new(true, &[]);
-        assert!(guard.pairing_code().is_some());
-        assert!(!guard.is_paired());
+        assert!(guard.pairing_code().await.is_some());
+        assert!(!guard.is_paired().await);
     }
 
     #[test]
     async fn new_guard_no_code_when_tokens_exist() {
         let guard = PairingGuard::new(true, &["zc_existing".into()]);
-        assert!(guard.pairing_code().is_none());
-        assert!(guard.is_paired());
+        assert!(guard.pairing_code().await.is_none());
+        assert!(guard.is_paired().await);
     }
 
     #[test]
     async fn new_guard_no_code_when_pairing_disabled() {
         let guard = PairingGuard::new(false, &[]);
-        assert!(guard.pairing_code().is_none());
+        assert!(guard.pairing_code().await.is_none());
     }
 
     #[test]
     async fn try_pair_correct_code() {
         let guard = PairingGuard::new(true, &[]);
-        let code = guard.pairing_code().unwrap().to_string();
+        let code = guard.pairing_code().await.unwrap().to_string();
         let token = guard.try_pair(&code, "test_client").await.unwrap();
         assert!(token.is_some());
         assert!(token.unwrap().starts_with("zc_"));
-        assert!(guard.is_paired());
+        assert!(guard.is_paired().await);
     }
 
     #[test]
@@ -320,7 +308,7 @@ mod tests {
     async fn is_authenticated_with_valid_token() {
         // Pass plaintext token — PairingGuard hashes it on load
         let guard = PairingGuard::new(true, &["zc_valid".into()]);
-        assert!(guard.is_authenticated("zc_valid"));
+        assert!(guard.is_authenticated("zc_valid").await);
     }
 
     #[test]
@@ -328,26 +316,26 @@ mod tests {
         // Pass an already-hashed token (64 hex chars)
         let hashed = hash_token("zc_valid");
         let guard = PairingGuard::new(true, &[hashed]);
-        assert!(guard.is_authenticated("zc_valid"));
+        assert!(guard.is_authenticated("zc_valid").await);
     }
 
     #[test]
     async fn is_authenticated_with_invalid_token() {
         let guard = PairingGuard::new(true, &["zc_valid".into()]);
-        assert!(!guard.is_authenticated("zc_invalid"));
+        assert!(!guard.is_authenticated("zc_invalid").await);
     }
 
     #[test]
     async fn is_authenticated_when_pairing_disabled() {
         let guard = PairingGuard::new(false, &[]);
-        assert!(guard.is_authenticated("anything"));
-        assert!(guard.is_authenticated(""));
+        assert!(guard.is_authenticated("anything").await);
+        assert!(guard.is_authenticated("").await);
     }
 
     #[test]
     async fn tokens_returns_hashes() {
         let guard = PairingGuard::new(true, &["zc_a".into(), "zc_b".into()]);
-        let tokens = guard.tokens();
+        let tokens = guard.tokens().await;
         assert_eq!(tokens.len(), 2);
         // Tokens should be stored as 64-char hex hashes, not plaintext
         for t in &tokens {
@@ -360,10 +348,10 @@ mod tests {
     #[test]
     async fn pair_then_authenticate() {
         let guard = PairingGuard::new(true, &[]);
-        let code = guard.pairing_code().unwrap().to_string();
+        let code = guard.pairing_code().await.unwrap().to_string();
         let token = guard.try_pair(&code, "test_client").await.unwrap().unwrap();
-        assert!(guard.is_authenticated(&token));
-        assert!(!guard.is_authenticated("wrong"));
+        assert!(guard.is_authenticated(&token).await);
+        assert!(!guard.is_authenticated("wrong").await);
     }
 
     // ── Token hashing ────────────────────────────────────────
@@ -495,7 +483,7 @@ mod tests {
     #[test]
     async fn correct_code_resets_failed_attempts() {
         let guard = PairingGuard::new(true, &[]);
-        let code = guard.pairing_code().unwrap().to_string();
+        let code = guard.pairing_code().await.unwrap().to_string();
         let client = "test_client";
         // Fail a few times
         for _ in 0..3 {
