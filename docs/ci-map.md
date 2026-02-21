@@ -13,7 +13,7 @@ Merge-blocking checks should stay small and deterministic. Optional checks are u
 - `.github/workflows/ci-run.yml` (`CI`)
     - Purpose: Rust validation (`cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D clippy::correctness`, strict delta lint gate on changed Rust lines, `test`, release build smoke) + docs quality checks when docs change (`markdownlint` blocks only issues on changed lines; link check scans only links added on changed lines)
     - Additional behavior: PRs that change `.github/workflows/**` require at least one approving review from a login in `WORKFLOW_OWNER_LOGINS` (repository variable fallback: `theonlyhennygod,willsarg`)
-    - Additional behavior: PRs that change root license files (`LICENSE`, `LICENSE-APACHE`) must be authored by `willsarg`
+    - Additional behavior: PRs that change root license files (`LICENSE-APACHE`, `LICENSE-MIT`) must be authored by `willsarg`
     - Additional behavior: lint gates run before `test`/`build`; when lint/docs gates fail on PRs, CI posts an actionable feedback comment with failing gate names and local fix commands
     - Merge gate: `CI Required Gate`
 - `.github/workflows/workflow-sanity.yml` (`Workflow Sanity`)
@@ -22,7 +22,7 @@ Merge-blocking checks should stay small and deterministic. Optional checks are u
 - `.github/workflows/pr-intake-checks.yml` (`PR Intake Checks`)
     - Purpose: safe pre-CI PR checks (template completeness, added-line tabs/trailing-whitespace/conflict markers) with immediate sticky feedback comment
 - `.github/workflows/main-promotion-gate.yml` (`Main Promotion Gate`)
-    - Purpose: enforce stable-branch policy by allowing only `dev` -> `main` PR promotion
+    - Purpose: enforce stable-branch policy by allowing only `dev` -> `main` PR promotion authored by `willsarg` or `theonlyhennygod`
 
 ### Non-Blocking but Important
 
@@ -77,13 +77,13 @@ Merge-blocking checks should stay small and deterministic. Optional checks are u
 - `Security Audit`: push to `dev` and `main`, PRs to `dev` and `main`, weekly schedule
 - `Sec Vorpal Reviewdog`: manual dispatch only
 - `Workflow Sanity`: PR/push when `.github/workflows/**`, `.github/*.yml`, or `.github/*.yaml` change
-- `Main Promotion Gate`: PRs to `main` only; requires head branch `dev` in the same repository
+- `Main Promotion Gate`: PRs to `main` only; requires PR author `willsarg`/`theonlyhennygod` and head branch `dev` in the same repository
+- `Dependabot`: all update PRs target `dev` (not `main`)
 - `PR Intake Checks`: `pull_request_target` on opened/reopened/synchronize/edited/ready_for_review
 - `Label Policy Sanity`: PR/push when `.github/label-policy.json`, `.github/workflows/pr-labeler.yml`, or `.github/workflows/pr-auto-response.yml` changes
 - `PR Labeler`: `pull_request_target` lifecycle events
 - `PR Auto Responder`: issue opened/labeled, `pull_request_target` opened/labeled
 - `Stale PR Check`: daily schedule, manual dispatch
-- `Dependabot`: weekly dependency maintenance windows
 - `PR Hygiene`: every 12 hours schedule, manual dispatch
 
 ## Fast Triage Guide
