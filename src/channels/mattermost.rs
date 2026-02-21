@@ -1,7 +1,7 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 
 /// Mattermost channel — polls channel posts via REST API v4.
 /// Mattermost is API-compatible with many Slack patterns but uses a dedicated v4 structure.
@@ -254,14 +254,14 @@ impl Channel for MattermostChannel {
             }
         });
 
-        let mut guard = self.typing_handle.lock();
+        let mut guard = self.typing_handle.lock().await;
         *guard = Some(handle);
 
         Ok(())
     }
 
     async fn stop_typing(&self, _recipient: &str) -> Result<()> {
-        let mut guard = self.typing_handle.lock();
+        let mut guard = self.typing_handle.lock().await;
         if let Some(handle) = guard.take() {
             handle.abort();
         }

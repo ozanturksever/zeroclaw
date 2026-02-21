@@ -30,7 +30,7 @@ use super::traits::{Channel, ChannelMessage, SendMessage};
 use super::whatsapp_storage::RusqliteStore;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use std::sync::Arc;
 use tokio::select;
 
@@ -156,7 +156,7 @@ impl Channel for WhatsAppWebChannel {
     }
 
     async fn send(&self, message: &SendMessage) -> Result<()> {
-        let client = self.client.lock().clone();
+        let client = self.client.lock().await.clone();
         let Some(client) = client else {
             anyhow::bail!("WhatsApp Web client not connected. Initialize the bot first.");
         };
@@ -190,7 +190,7 @@ impl Channel for WhatsAppWebChannel {
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> Result<()> {
         // Store the sender channel for incoming messages
-        *self.tx.lock() = Some(tx.clone());
+        *self.tx.lock().await = Some(tx.clone());
 
         use wa_rs::bot::Bot;
         use wa_rs::pair_code::PairCodeOptions;
@@ -207,7 +207,7 @@ impl Channel for WhatsAppWebChannel {
         );
 
         // Initialize storage backend
-        let storage = RusqliteStore::new(&self.session_path)?;
+        let storage = RusqliteStore::new(&self.session_path).await?;
         let backend = Arc::new(storage);
 
         // Check if we have a saved device to load
@@ -338,13 +338,13 @@ impl Channel for WhatsAppWebChannel {
         }
 
         let mut bot = builder.build().await?;
-        *self.client.lock() = Some(bot.client());
+        *self.client.lock().await = Some(bot.client());
 
         // Run the bot
         let bot_handle = bot.run().await?;
 
         // Store the bot handle for later shutdown
-        *self.bot_handle.lock() = Some(bot_handle);
+        *self.bot_handle.lock().await = Some(bot_handle);
 
         // Wait for shutdown signal
         let (_shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
@@ -358,8 +358,8 @@ impl Channel for WhatsAppWebChannel {
             }
         }
 
-        *self.client.lock() = None;
-        if let Some(handle) = self.bot_handle.lock().take() {
+        *self.client.lock().await = None;
+        if let Some(handle) = self.bot_handle.lock().await.take() {
             handle.abort();
         }
 
@@ -367,12 +367,12 @@ impl Channel for WhatsAppWebChannel {
     }
 
     async fn health_check(&self) -> bool {
-        let bot_handle_guard = self.bot_handle.lock();
+        let bot_handle_guard = self.bot_handle.lock().await;
         bot_handle_guard.is_some()
     }
 
     async fn start_typing(&self, recipient: &str) -> Result<()> {
-        let client = self.client.lock().clone();
+        let client = self.client.lock().await.clone();
         let Some(client) = client else {
             anyhow::bail!("WhatsApp Web client not connected. Initialize the bot first.");
         };
@@ -400,7 +400,7 @@ impl Channel for WhatsAppWebChannel {
     }
 
     async fn stop_typing(&self, recipient: &str) -> Result<()> {
-        let client = self.client.lock().clone();
+        let client = self.client.lock().await.clone();
         let Some(client) = client else {
             anyhow::bail!("WhatsApp Web client not connected. Initialize the bot first.");
         };

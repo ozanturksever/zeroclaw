@@ -120,7 +120,7 @@ impl Tool for PushoverTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

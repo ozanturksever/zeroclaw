@@ -32,7 +32,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -103,7 +103,7 @@ impl SlidingWindowRateLimiter {
         });
     }
 
-    fn allow(&self, key: &str) -> bool {
+    async fn allow(&self, key: &str) -> bool {
         if self.limit_per_window == 0 {
             return true;
         }
@@ -111,7 +111,7 @@ impl SlidingWindowRateLimiter {
         let now = Instant::now();
         let cutoff = now.checked_sub(self.window).unwrap_or_else(Instant::now);
 
-        let mut guard = self.requests.lock();
+        let mut guard = self.requests.lock().await;
         let (requests, last_sweep) = &mut *guard;
 
         // Periodic sweep: remove keys with no recent requests
@@ -163,12 +163,12 @@ impl GatewayRateLimiter {
         }
     }
 
-    fn allow_pair(&self, key: &str) -> bool {
-        self.pair.allow(key)
+    async fn allow_pair(&self, key: &str) -> bool {
+        self.pair.allow(key).await
     }
 
-    fn allow_webhook(&self, key: &str) -> bool {
-        self.webhook.allow(key)
+    async fn allow_webhook(&self, key: &str) -> bool {
+        self.webhook.allow(key).await
     }
 }
 
@@ -189,9 +189,9 @@ impl IdempotencyStore {
     }
 
     /// Returns true if this key is new and is now recorded.
-    fn record_if_new(&self, key: &str) -> bool {
+    async fn record_if_new(&self, key: &str) -> bool {
         let now = Instant::now();
-        let mut keys = self.keys.lock();
+        let mut keys = self.keys.lock().await;
 
         keys.retain(|_, seen_at| now.duration_since(*seen_at) < self.ttl);
 
@@ -584,7 +584,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     }
     println!("  Press Ctrl+C to stop.\n");
 
-    crate::health::mark_component_ok("gateway");
+    crate::health::mark_component_ok("gateway").await;
 
     // Fire gateway start hook
     if let Some(ref hooks) = hooks {
@@ -689,7 +689,7 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let body = serde_json::json!({
         "status": "ok",
         "paired": state.pairing.is_paired().await,
-        "runtime": crate::health::snapshot_json(),
+        "runtime": crate::health::snapshot_json().await,
     });
     Json(body)
 }
@@ -726,7 +726,7 @@ async fn handle_pair(
 ) -> impl IntoResponse {
     let rate_key =
         client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
-    if !state.rate_limiter.allow_pair(&rate_key) {
+    if !state.rate_limiter.allow_pair(&rate_key).await {
         tracing::warn!("/pair rate limit exceeded");
         let err = serde_json::json!({
             "error": "Too many pairing requests. Please retry later.",
@@ -782,7 +782,7 @@ async fn handle_pair(
 
 async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGuard) -> Result<()> {
     let paired_tokens = pairing.tokens().await;
-    let mut updated_cfg = { config.lock().clone() };
+    let mut updated_cfg = { config.lock().await.clone() };
     updated_cfg.gateway.paired_tokens = paired_tokens;
     updated_cfg
         .save()
@@ -790,7 +790,7 @@ async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGua
         .context("Failed to persist paired tokens to config.toml")?;
 
     // Keep shared runtime config in sync with persisted tokens.
-    *config.lock() = updated_cfg;
+    *config.lock().await = updated_cfg;
     Ok(())
 }
 
@@ -801,7 +801,7 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
     // Keep webhook/gateway prompts aligned with channel behavior by injecting
     // workspace-aware system context before model invocation.
     let system_prompt = {
-        let config_guard = state.config.lock();
+        let config_guard = state.config.lock().await;
         crate::channels::build_system_prompt(
             &config_guard.workspace_dir,
             &state.model,
@@ -816,7 +816,7 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
     messages.push(ChatMessage::system(system_prompt));
     messages.extend(user_messages);
 
-    let multimodal_config = state.config.lock().multimodal.clone();
+    let multimodal_config = state.config.lock().await.multimodal.clone();
     let prepared =
         crate::multimodal::prepare_messages_for_provider(&messages, &multimodal_config).await?;
 
@@ -847,7 +847,7 @@ async fn handle_webhook(
 ) -> impl IntoResponse {
     let rate_key =
         client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
-    if !state.rate_limiter.allow_webhook(&rate_key) {
+    if !state.rate_limiter.allow_webhook(&rate_key).await {
         tracing::warn!("/webhook rate limit exceeded");
         let err = serde_json::json!({
             "error": "Too many webhook requests. Please retry later.",
@@ -909,7 +909,7 @@ async fn handle_webhook(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        if !state.idempotency_store.record_if_new(idempotency_key) {
+        if !state.idempotency_store.record_if_new(idempotency_key).await {
             tracing::info!("Webhook duplicate ignored (idempotency key: {idempotency_key})");
             let body = serde_json::json!({
                 "status": "duplicate",
@@ -933,6 +933,7 @@ async fn handle_webhook(
     let provider_label = state
         .config
         .lock()
+        .await
         .default_provider
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
@@ -1403,7 +1404,7 @@ mod tests {
     use axum::http::HeaderValue;
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
-    use parking_lot::Mutex;
+    use tokio::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Generate a random hex secret at runtime to avoid hard-coded cryptographic values.
@@ -1532,30 +1533,30 @@ mod tests {
         assert!(text.contains("zeroclaw_heartbeat_ticks_total 1"));
     }
 
-    #[test]
-    fn gateway_rate_limiter_blocks_after_limit() {
+    #[tokio::test]
+    async fn gateway_rate_limiter_blocks_after_limit() {
         let limiter = GatewayRateLimiter::new(2, 2, 100);
-        assert!(limiter.allow_pair("127.0.0.1"));
-        assert!(limiter.allow_pair("127.0.0.1"));
-        assert!(!limiter.allow_pair("127.0.0.1"));
+        assert!(limiter.allow_pair("127.0.0.1").await);
+        assert!(limiter.allow_pair("127.0.0.1").await);
+        assert!(!limiter.allow_pair("127.0.0.1").await);
     }
 
-    #[test]
-    fn rate_limiter_sweep_removes_stale_entries() {
+    #[tokio::test]
+    async fn rate_limiter_sweep_removes_stale_entries() {
         let limiter = SlidingWindowRateLimiter::new(10, Duration::from_secs(60), 100);
         // Add entries for multiple IPs
-        assert!(limiter.allow("ip-1"));
-        assert!(limiter.allow("ip-2"));
-        assert!(limiter.allow("ip-3"));
+        assert!(limiter.allow("ip-1").await);
+        assert!(limiter.allow("ip-2").await);
+        assert!(limiter.allow("ip-3").await);
 
         {
-            let guard = limiter.requests.lock();
+            let guard = limiter.requests.lock().await;
             assert_eq!(guard.0.len(), 3);
         }
 
         // Force a sweep by backdating last_sweep
         {
-            let mut guard = limiter.requests.lock();
+            let mut guard = limiter.requests.lock().await;
             guard.1 = Instant::now()
                 .checked_sub(Duration::from_secs(RATE_LIMITER_SWEEP_INTERVAL_SECS + 1))
                 .unwrap();
@@ -1565,54 +1566,54 @@ mod tests {
         }
 
         // Next allow() call should trigger sweep and remove stale entries
-        assert!(limiter.allow("ip-1"));
+        assert!(limiter.allow("ip-1").await);
 
         {
-            let guard = limiter.requests.lock();
+            let guard = limiter.requests.lock().await;
             assert_eq!(guard.0.len(), 1, "Stale entries should have been swept");
             assert!(guard.0.contains_key("ip-1"));
         }
     }
 
-    #[test]
-    fn rate_limiter_zero_limit_always_allows() {
+    #[tokio::test]
+    async fn rate_limiter_zero_limit_always_allows() {
         let limiter = SlidingWindowRateLimiter::new(0, Duration::from_secs(60), 10);
         for _ in 0..100 {
-            assert!(limiter.allow("any-key"));
+            assert!(limiter.allow("any-key").await);
         }
     }
 
-    #[test]
-    fn idempotency_store_rejects_duplicate_key() {
+    #[tokio::test]
+    async fn idempotency_store_rejects_duplicate_key() {
         let store = IdempotencyStore::new(Duration::from_secs(30), 10);
-        assert!(store.record_if_new("req-1"));
-        assert!(!store.record_if_new("req-1"));
-        assert!(store.record_if_new("req-2"));
+        assert!(store.record_if_new("req-1").await);
+        assert!(!store.record_if_new("req-1").await);
+        assert!(store.record_if_new("req-2").await);
     }
 
-    #[test]
-    fn rate_limiter_bounded_cardinality_evicts_oldest_key() {
+    #[tokio::test]
+    async fn rate_limiter_bounded_cardinality_evicts_oldest_key() {
         let limiter = SlidingWindowRateLimiter::new(5, Duration::from_secs(60), 2);
-        assert!(limiter.allow("ip-1"));
-        assert!(limiter.allow("ip-2"));
-        assert!(limiter.allow("ip-3"));
+        assert!(limiter.allow("ip-1").await);
+        assert!(limiter.allow("ip-2").await);
+        assert!(limiter.allow("ip-3").await);
 
-        let guard = limiter.requests.lock();
+        let guard = limiter.requests.lock().await;
         assert_eq!(guard.0.len(), 2);
         assert!(guard.0.contains_key("ip-2"));
         assert!(guard.0.contains_key("ip-3"));
     }
 
-    #[test]
-    fn idempotency_store_bounded_cardinality_evicts_oldest_key() {
+    #[tokio::test]
+    async fn idempotency_store_bounded_cardinality_evicts_oldest_key() {
         let store = IdempotencyStore::new(Duration::from_secs(300), 2);
-        assert!(store.record_if_new("k1"));
-        std::thread::sleep(Duration::from_millis(2));
-        assert!(store.record_if_new("k2"));
-        std::thread::sleep(Duration::from_millis(2));
-        assert!(store.record_if_new("k3"));
+        assert!(store.record_if_new("k1").await);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert!(store.record_if_new("k2").await);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert!(store.record_if_new("k3").await);
 
-        let keys = store.keys.lock();
+        let keys = store.keys.lock().await;
         assert_eq!(keys.len(), 2);
         assert!(!keys.contains_key("k1"));
         assert!(keys.contains_key("k2"));
@@ -1695,7 +1696,7 @@ mod tests {
         assert_eq!(persisted.len(), 64);
         assert!(persisted.chars().all(|c| c.is_ascii_hexdigit()));
 
-        let in_memory = shared_config.lock();
+        let in_memory = shared_config.lock().await;
         assert_eq!(in_memory.gateway.paired_tokens.len(), 1);
         assert_eq!(&in_memory.gateway.paired_tokens[0], persisted);
     }
@@ -1816,7 +1817,7 @@ mod tests {
             _category: MemoryCategory,
             _session_id: Option<&str>,
         ) -> anyhow::Result<()> {
-            self.keys.lock().push(key.to_string());
+            self.keys.lock().await.push(key.to_string());
             Ok(())
         }
 
@@ -1846,7 +1847,7 @@ mod tests {
         }
 
         async fn count(&self) -> anyhow::Result<usize> {
-            let size = self.keys.lock().len();
+            let size = self.keys.lock().await.len();
             Ok(size)
         }
 
@@ -1975,7 +1976,7 @@ mod tests {
             .into_response();
         assert_eq!(second.status(), StatusCode::OK);
 
-        let keys = tracking_impl.keys.lock().clone();
+        let keys = tracking_impl.keys.lock().await.clone();
         assert_eq!(keys.len(), 2);
         assert_ne!(keys[0], keys[1]);
         assert!(keys[0].starts_with("webhook_msg_"));

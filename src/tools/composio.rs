@@ -714,7 +714,7 @@ impl Tool for ComposioTool {
             "execute" => {
                 if let Err(error) = self
                     .security
-                    .enforce_tool_operation(ToolOperation::Act, "composio.execute")
+                    .enforce_tool_operation(ToolOperation::Act, "composio.execute").await
                 {
                     return Ok(ToolResult {
                         success: false,
@@ -759,7 +759,7 @@ impl Tool for ComposioTool {
             "connect" => {
                 if let Err(error) = self
                     .security
-                    .enforce_tool_operation(ToolOperation::Act, "composio.connect")
+                    .enforce_tool_operation(ToolOperation::Act, "composio.connect").await
                 {
                     return Ok(ToolResult {
                         success: false,

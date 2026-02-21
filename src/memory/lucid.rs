@@ -2,7 +2,7 @@ use super::sqlite::SqliteMemory;
 use super::traits::{Memory, MemoryCategory, MemoryEntry};
 use async_trait::async_trait;
 use chrono::Local;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -115,20 +115,20 @@ impl LucidMemory {
         Duration::from_millis(millis)
     }
 
-    fn in_failure_cooldown(&self) -> bool {
-        let guard = self.last_failure_at.lock();
+    async fn in_failure_cooldown(&self) -> bool {
+        let guard = self.last_failure_at.lock().await;
         guard
             .as_ref()
             .is_some_and(|last| last.elapsed() < self.failure_cooldown)
     }
 
-    fn mark_failure_now(&self) {
-        let mut guard = self.last_failure_at.lock();
+    async fn mark_failure_now(&self) {
+        let mut guard = self.last_failure_at.lock().await;
         *guard = Some(Instant::now());
     }
 
-    fn clear_failure(&self) {
-        let mut guard = self.last_failure_at.lock();
+    async fn clear_failure(&self) {
+        let mut guard = self.last_failure_at.lock().await;
         *guard = None;
     }
 
@@ -334,21 +334,21 @@ impl Memory for LucidMemory {
             return Ok(local_results);
         }
 
-        if self.in_failure_cooldown() {
+        if self.in_failure_cooldown().await {
             return Ok(local_results);
         }
 
         match self.recall_from_lucid(query).await {
             Ok(lucid_results) if !lucid_results.is_empty() => {
-                self.clear_failure();
+                self.clear_failure().await;
                 Ok(Self::merge_results(local_results, lucid_results, limit))
             }
             Ok(_) => {
-                self.clear_failure();
+                self.clear_failure().await;
                 Ok(local_results)
             }
             Err(error) => {
-                self.mark_failure_now();
+                self.mark_failure_now().await;
                 tracing::debug!(
                     command = %self.lucid_cmd,
                     error = %error,

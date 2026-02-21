@@ -4,7 +4,7 @@ use super::vector;
 use anyhow::Context;
 use async_trait::async_trait;
 use chrono::Local;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use rusqlite::{params, Connection};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -231,11 +231,10 @@ impl SqliteMemory {
         let now = Local::now().to_rfc3339();
 
         // Check cache (offloaded to blocking thread)
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
         let hash_c = hash.clone();
         let now_c = now.clone();
         let cached = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<f32>>> {
-            let conn = conn.lock();
             let mut stmt =
                 conn.prepare("SELECT embedding FROM embedding_cache WHERE content_hash = ?1")?;
             let blob: Option<Vec<u8>> = stmt.query_row(params![hash_c], |row| row.get(0)).ok();
@@ -259,11 +258,10 @@ impl SqliteMemory {
         let bytes = vector::vec_to_bytes(&embedding);
 
         // Store in cache + LRU eviction (offloaded to blocking thread)
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
         #[allow(clippy::cast_possible_wrap)]
         let cache_max = self.cache_max as i64;
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let conn = conn.lock();
             conn.execute(
                 "INSERT OR REPLACE INTO embedding_cache (content_hash, embedding, created_at, accessed_at)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -381,9 +379,8 @@ impl SqliteMemory {
     pub async fn reindex(&self) -> anyhow::Result<usize> {
         // Step 1: Rebuild FTS5
         {
-            let conn = self.conn.clone();
+            let conn = self.conn.clone().lock_owned().await;
             tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                let conn = conn.lock();
                 conn.execute_batch("INSERT INTO memories_fts(memories_fts) VALUES('rebuild');")?;
                 Ok(())
             })
@@ -395,9 +392,8 @@ impl SqliteMemory {
             return Ok(0);
         }
 
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
         let entries: Vec<(String, String)> = tokio::task::spawn_blocking(move || {
-            let conn = conn.lock();
             let mut stmt =
                 conn.prepare("SELECT id, content FROM memories WHERE embedding IS NULL")?;
             let rows = stmt.query_map([], |row| {
@@ -411,10 +407,9 @@ impl SqliteMemory {
         for (id, content) in &entries {
             if let Ok(Some(emb)) = self.get_or_compute_embedding(content).await {
                 let bytes = vector::vec_to_bytes(&emb);
-                let conn = self.conn.clone();
+                let conn = self.conn.clone().lock_owned().await;
                 let id = id.clone();
                 tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                    let conn = conn.lock();
                     conn.execute(
                         "UPDATE memories SET embedding = ?1 WHERE id = ?2",
                         params![bytes, id],
@@ -449,13 +444,12 @@ impl Memory for SqliteMemory {
             .await?
             .map(|emb| vector::vec_to_bytes(&emb));
 
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
         let key = key.to_string();
         let content = content.to_string();
         let sid = session_id.map(String::from);
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let conn = conn.lock();
             let now = Local::now().to_rfc3339();
             let cat = Self::category_to_str(&category);
             let id = Uuid::new_v4().to_string();
@@ -489,14 +483,13 @@ impl Memory for SqliteMemory {
         // Compute query embedding (async, before blocking work)
         let query_embedding = self.get_or_compute_embedding(query).await?;
 
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
         let query = query.to_string();
         let sid = session_id.map(String::from);
         let vector_weight = self.vector_weight;
         let keyword_weight = self.keyword_weight;
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
-            let conn = conn.lock();
             let session_ref = sid.as_deref();
 
             // FTS5 BM25 keyword search
@@ -653,11 +646,10 @@ impl Memory for SqliteMemory {
     }
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
         let key = key.to_string();
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<MemoryEntry>> {
-            let conn = conn.lock();
             let mut stmt = conn.prepare(
                 "SELECT id, key, content, category, created_at, session_id FROM memories WHERE key = ?1",
             )?;
@@ -689,12 +681,11 @@ impl Memory for SqliteMemory {
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         const DEFAULT_LIST_LIMIT: i64 = 1000;
 
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
         let category = category.cloned();
         let sid = session_id.map(String::from);
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
-            let conn = conn.lock();
             let session_ref = sid.as_deref();
             let mut results = Vec::new();
 
@@ -749,11 +740,10 @@ impl Memory for SqliteMemory {
     }
 
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
         let key = key.to_string();
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let conn = conn.lock();
             let affected = conn.execute("DELETE FROM memories WHERE key = ?1", params![key])?;
             Ok(affected > 0)
         })
@@ -761,10 +751,9 @@ impl Memory for SqliteMemory {
     }
 
     async fn count(&self) -> anyhow::Result<usize> {
-        let conn = self.conn.clone();
+        let conn = self.conn.clone().lock_owned().await;
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-            let conn = conn.lock();
             let count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -774,8 +763,8 @@ impl Memory for SqliteMemory {
     }
 
     async fn health_check(&self) -> bool {
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || conn.lock().execute_batch("SELECT 1").is_ok())
+        let conn = self.conn.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || conn.execute_batch("SELECT 1").is_ok())
             .await
             .unwrap_or(false)
     }
@@ -1096,7 +1085,7 @@ mod tests {
     #[tokio::test]
     async fn schema_has_fts5_table() {
         let (_tmp, mem) = temp_sqlite();
-        let conn = mem.conn.lock();
+        let conn = mem.conn.lock().await;
         // FTS5 table should exist
         let count: i64 = conn
             .query_row(
@@ -1111,7 +1100,7 @@ mod tests {
     #[tokio::test]
     async fn schema_has_embedding_cache() {
         let (_tmp, mem) = temp_sqlite();
-        let conn = mem.conn.lock();
+        let conn = mem.conn.lock().await;
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_cache'",
@@ -1125,7 +1114,7 @@ mod tests {
     #[tokio::test]
     async fn schema_memories_has_embedding_column() {
         let (_tmp, mem) = temp_sqlite();
-        let conn = mem.conn.lock();
+        let conn = mem.conn.lock().await;
         // Check that embedding column exists by querying it
         let result = conn.execute_batch("SELECT embedding FROM memories LIMIT 0");
         assert!(result.is_ok());
@@ -1145,7 +1134,7 @@ mod tests {
         .await
         .unwrap();
 
-        let conn = mem.conn.lock();
+        let conn = mem.conn.lock().await;
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH '\"unique_searchterm_xyz\"'",
@@ -1169,7 +1158,7 @@ mod tests {
         .unwrap();
         mem.forget("del_key").await.unwrap();
 
-        let conn = mem.conn.lock();
+        let conn = mem.conn.lock().await;
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH '\"deletable_content_abc\"'",
@@ -1195,7 +1184,7 @@ mod tests {
             .await
             .unwrap();
 
-        let conn = mem.conn.lock();
+        let conn = mem.conn.lock().await;
         // Old content should not be findable
         let old: i64 = conn
             .query_row(

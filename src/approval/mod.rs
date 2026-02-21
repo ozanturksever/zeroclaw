@@ -6,7 +6,7 @@
 use crate::config::AutonomyConfig;
 use crate::security::AutonomyLevel;
 use chrono::Utc;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
@@ -77,7 +77,7 @@ impl ApprovalManager {
     /// Check whether a tool call requires interactive approval.
     ///
     /// Returns `true` if the call needs a prompt, `false` if it can proceed.
-    pub fn needs_approval(&self, tool_name: &str) -> bool {
+    pub async fn needs_approval(&self, tool_name: &str) -> bool {
         // Full autonomy never prompts.
         if self.autonomy_level == AutonomyLevel::Full {
             return false;
@@ -99,7 +99,7 @@ impl ApprovalManager {
         }
 
         // Session allowlist (from prior "Always" responses).
-        let allowlist = self.session_allowlist.lock();
+        let allowlist = self.session_allowlist.lock().await;
         if allowlist.contains(tool_name) {
             return false;
         }
@@ -109,7 +109,7 @@ impl ApprovalManager {
     }
 
     /// Record an approval decision and update session state.
-    pub fn record_decision(
+    pub async fn record_decision(
         &self,
         tool_name: &str,
         args: &serde_json::Value,
@@ -118,7 +118,7 @@ impl ApprovalManager {
     ) {
         // If "Always", add to session allowlist.
         if decision == ApprovalResponse::Always {
-            let mut allowlist = self.session_allowlist.lock();
+            let mut allowlist = self.session_allowlist.lock().await;
             allowlist.insert(tool_name.to_string());
         }
 
@@ -131,18 +131,18 @@ impl ApprovalManager {
             decision,
             channel: channel.to_string(),
         };
-        let mut log = self.audit_log.lock();
+        let mut log = self.audit_log.lock().await;
         log.push(entry);
     }
 
     /// Get a snapshot of the audit log.
-    pub fn audit_log(&self) -> Vec<ApprovalLogEntry> {
-        self.audit_log.lock().clone()
+    pub async fn audit_log(&self) -> Vec<ApprovalLogEntry> {
+        self.audit_log.lock().await.clone()
     }
 
     /// Get the current session allowlist.
-    pub fn session_allowlist(&self) -> HashSet<String> {
-        self.session_allowlist.lock().clone()
+    pub async fn session_allowlist(&self) -> HashSet<String> {
+        self.session_allowlist.lock().await.clone()
     }
 
     /// Prompt the user on the CLI and return their decision.
@@ -239,64 +239,64 @@ mod tests {
 
     // ── needs_approval ───────────────────────────────────────
 
-    #[test]
-    fn auto_approve_tools_skip_prompt() {
+    #[tokio::test]
+    async fn auto_approve_tools_skip_prompt() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(!mgr.needs_approval("file_read"));
-        assert!(!mgr.needs_approval("memory_recall"));
+        assert!(!mgr.needs_approval("file_read").await);
+        assert!(!mgr.needs_approval("memory_recall").await);
     }
 
-    #[test]
-    fn always_ask_tools_always_prompt() {
+    #[tokio::test]
+    async fn always_ask_tools_always_prompt() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(mgr.needs_approval("shell"));
+        assert!(mgr.needs_approval("shell").await);
     }
 
-    #[test]
-    fn unknown_tool_needs_approval_in_supervised() {
+    #[tokio::test]
+    async fn unknown_tool_needs_approval_in_supervised() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(mgr.needs_approval("file_write"));
-        assert!(mgr.needs_approval("http_request"));
+        assert!(mgr.needs_approval("file_write").await);
+        assert!(mgr.needs_approval("http_request").await);
     }
 
-    #[test]
-    fn full_autonomy_never_prompts() {
+    #[tokio::test]
+    async fn full_autonomy_never_prompts() {
         let mgr = ApprovalManager::from_config(&full_config());
-        assert!(!mgr.needs_approval("shell"));
-        assert!(!mgr.needs_approval("file_write"));
-        assert!(!mgr.needs_approval("anything"));
+        assert!(!mgr.needs_approval("shell").await);
+        assert!(!mgr.needs_approval("file_write").await);
+        assert!(!mgr.needs_approval("anything").await);
     }
 
-    #[test]
-    fn readonly_never_prompts() {
+    #[tokio::test]
+    async fn readonly_never_prompts() {
         let config = AutonomyConfig {
             level: AutonomyLevel::ReadOnly,
             ..AutonomyConfig::default()
         };
         let mgr = ApprovalManager::from_config(&config);
-        assert!(!mgr.needs_approval("shell"));
+        assert!(!mgr.needs_approval("shell").await);
     }
 
     // ── session allowlist ────────────────────────────────────
 
-    #[test]
-    fn always_response_adds_to_session_allowlist() {
+    #[tokio::test]
+    async fn always_response_adds_to_session_allowlist() {
         let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(mgr.needs_approval("file_write"));
+        assert!(mgr.needs_approval("file_write").await);
 
         mgr.record_decision(
             "file_write",
             &serde_json::json!({"path": "test.txt"}),
             ApprovalResponse::Always,
             "cli",
-        );
+        ).await;
 
         // Now file_write should be in session allowlist.
-        assert!(!mgr.needs_approval("file_write"));
+        assert!(!mgr.needs_approval("file_write").await);
     }
 
-    #[test]
-    fn always_ask_overrides_session_allowlist() {
+    #[tokio::test]
+    async fn always_ask_overrides_session_allowlist() {
         let mgr = ApprovalManager::from_config(&supervised_config());
 
         // Even after "Always" for shell, it should still prompt.
@@ -305,28 +305,28 @@ mod tests {
             &serde_json::json!({"command": "ls"}),
             ApprovalResponse::Always,
             "cli",
-        );
+        ).await;
 
         // shell is in always_ask, so it still needs approval.
-        assert!(mgr.needs_approval("shell"));
+        assert!(mgr.needs_approval("shell").await);
     }
 
-    #[test]
-    fn yes_response_does_not_add_to_allowlist() {
+    #[tokio::test]
+    async fn yes_response_does_not_add_to_allowlist() {
         let mgr = ApprovalManager::from_config(&supervised_config());
         mgr.record_decision(
             "file_write",
             &serde_json::json!({}),
             ApprovalResponse::Yes,
             "cli",
-        );
-        assert!(mgr.needs_approval("file_write"));
+        ).await;
+        assert!(mgr.needs_approval("file_write").await);
     }
 
     // ── audit log ────────────────────────────────────────────
 
-    #[test]
-    fn audit_log_records_decisions() {
+    #[tokio::test]
+    async fn audit_log_records_decisions() {
         let mgr = ApprovalManager::from_config(&supervised_config());
 
         mgr.record_decision(
@@ -334,15 +334,15 @@ mod tests {
             &serde_json::json!({"command": "rm -rf ./build/"}),
             ApprovalResponse::No,
             "cli",
-        );
+        ).await;
         mgr.record_decision(
             "file_write",
             &serde_json::json!({"path": "out.txt", "content": "hello"}),
             ApprovalResponse::Yes,
             "cli",
-        );
+        ).await;
 
-        let log = mgr.audit_log();
+        let log = mgr.audit_log().await;
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].tool_name, "shell");
         assert_eq!(log[0].decision, ApprovalResponse::No);
@@ -350,17 +350,17 @@ mod tests {
         assert_eq!(log[1].decision, ApprovalResponse::Yes);
     }
 
-    #[test]
-    fn audit_log_contains_timestamp_and_channel() {
+    #[tokio::test]
+    async fn audit_log_contains_timestamp_and_channel() {
         let mgr = ApprovalManager::from_config(&supervised_config());
         mgr.record_decision(
             "shell",
             &serde_json::json!({"command": "ls"}),
             ApprovalResponse::Yes,
             "telegram",
-        );
+        ).await;
 
-        let log = mgr.audit_log();
+        let log = mgr.audit_log().await;
         assert_eq!(log.len(), 1);
         assert!(!log[0].timestamp.is_empty());
         assert_eq!(log[0].channel, "telegram");

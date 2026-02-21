@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use std::sync::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -48,7 +48,7 @@ impl ActionTracker {
 
     /// Record an action and return the current count within the window.
     pub fn record(&self) -> usize {
-        let mut actions = self.actions.lock();
+        let mut actions = self.actions.lock().unwrap();
         let cutoff = Instant::now()
             .checked_sub(std::time::Duration::from_secs(3600))
             .unwrap_or_else(Instant::now);
@@ -59,7 +59,7 @@ impl ActionTracker {
 
     /// Count of actions in the current window without recording.
     pub fn count(&self) -> usize {
-        let mut actions = self.actions.lock();
+        let mut actions = self.actions.lock().unwrap();
         let cutoff = Instant::now()
             .checked_sub(std::time::Duration::from_secs(3600))
             .unwrap_or_else(Instant::now);
@@ -70,7 +70,7 @@ impl ActionTracker {
 
 impl Clone for ActionTracker {
     fn clone(&self) -> Self {
-        let actions = self.actions.lock();
+        let actions = self.actions.lock().unwrap();
         Self {
             actions: Mutex::new(actions.clone()),
         }
@@ -968,7 +968,7 @@ impl SecurityPolicy {
     ///
     /// Read operations are always allowed by autonomy/rate gates.
     /// Act operations require non-readonly autonomy and available action budget.
-    pub fn enforce_tool_operation(
+    pub async fn enforce_tool_operation(
         &self,
         operation: ToolOperation,
         operation_name: &str,
@@ -982,7 +982,7 @@ impl SecurityPolicy {
                     ));
                 }
 
-                if !self.record_action() {
+                if !self.record_action().await {
                     return Err("Rate limit exceeded: action budget exhausted".to_string());
                 }
 
@@ -993,13 +993,13 @@ impl SecurityPolicy {
 
     /// Record an action and check if the rate limit has been exceeded.
     /// Returns `true` if the action is allowed, `false` if rate-limited.
-    pub fn record_action(&self) -> bool {
+    pub async fn record_action(&self) -> bool {
         let count = self.tracker.record();
         count <= self.max_actions_per_hour as usize
     }
 
     /// Check if the rate limit would be exceeded without recording.
-    pub fn is_rate_limited(&self) -> bool {
+    pub async fn is_rate_limited(&self) -> bool {
         self.tracker.count() >= self.max_actions_per_hour as usize
     }
 
@@ -1090,31 +1090,34 @@ mod tests {
         assert!(full_policy().can_act());
     }
 
-    #[test]
-    fn enforce_tool_operation_read_allowed_in_readonly_mode() {
+    #[tokio::test]
+    async fn enforce_tool_operation_read_allowed_in_readonly_mode() {
         let p = readonly_policy();
         assert!(p
             .enforce_tool_operation(ToolOperation::Read, "memory_recall")
+            .await
             .is_ok());
     }
 
-    #[test]
-    fn enforce_tool_operation_act_blocked_in_readonly_mode() {
+    #[tokio::test]
+    async fn enforce_tool_operation_act_blocked_in_readonly_mode() {
         let p = readonly_policy();
         let err = p
             .enforce_tool_operation(ToolOperation::Act, "memory_store")
+            .await
             .unwrap_err();
         assert!(err.contains("read-only mode"));
     }
 
-    #[test]
-    fn enforce_tool_operation_act_uses_rate_budget() {
+    #[tokio::test]
+    async fn enforce_tool_operation_act_uses_rate_budget() {
         let p = SecurityPolicy {
             max_actions_per_hour: 0,
             ..default_policy()
         };
         let err = p
             .enforce_tool_operation(ToolOperation::Act, "memory_store")
+            .await
             .unwrap_err();
         assert!(err.contains("Rate limit exceeded"));
     }
@@ -1429,14 +1432,14 @@ mod tests {
 
     // ── ActionTracker / rate limiting ───────────────────────
 
-    #[test]
-    fn action_tracker_starts_at_zero() {
+    #[tokio::test]
+    async fn action_tracker_starts_at_zero() {
         let tracker = ActionTracker::new();
         assert_eq!(tracker.count(), 0);
     }
 
-    #[test]
-    fn action_tracker_records_actions() {
+    #[tokio::test]
+    async fn action_tracker_records_actions() {
         let tracker = ActionTracker::new();
         assert_eq!(tracker.record(), 1);
         assert_eq!(tracker.record(), 2);
@@ -1444,44 +1447,44 @@ mod tests {
         assert_eq!(tracker.count(), 3);
     }
 
-    #[test]
-    fn record_action_allows_within_limit() {
+    #[tokio::test]
+    async fn record_action_allows_within_limit() {
         let p = SecurityPolicy {
             max_actions_per_hour: 5,
             ..SecurityPolicy::default()
         };
         for _ in 0..5 {
-            assert!(p.record_action(), "should allow actions within limit");
+            assert!(p.record_action().await, "should allow actions within limit");
         }
     }
 
-    #[test]
-    fn record_action_blocks_over_limit() {
+    #[tokio::test]
+    async fn record_action_blocks_over_limit() {
         let p = SecurityPolicy {
             max_actions_per_hour: 3,
             ..SecurityPolicy::default()
         };
-        assert!(p.record_action()); // 1
-        assert!(p.record_action()); // 2
-        assert!(p.record_action()); // 3
-        assert!(!p.record_action()); // 4 — over limit
+        assert!(p.record_action().await); // 1
+        assert!(p.record_action().await); // 2
+        assert!(p.record_action().await); // 3
+        assert!(!p.record_action().await); // 4 — over limit
     }
 
-    #[test]
-    fn is_rate_limited_reflects_count() {
+    #[tokio::test]
+    async fn is_rate_limited_reflects_count() {
         let p = SecurityPolicy {
             max_actions_per_hour: 2,
             ..SecurityPolicy::default()
         };
-        assert!(!p.is_rate_limited());
-        p.record_action();
-        assert!(!p.is_rate_limited());
-        p.record_action();
-        assert!(p.is_rate_limited());
+        assert!(!p.is_rate_limited().await);
+        p.record_action().await;
+        assert!(!p.is_rate_limited().await);
+        p.record_action().await;
+        assert!(p.is_rate_limited().await);
     }
 
-    #[test]
-    fn action_tracker_clone_is_independent() {
+    #[tokio::test]
+    async fn action_tracker_clone_is_independent() {
         let tracker = ActionTracker::new();
         tracker.record();
         tracker.record();
@@ -1814,34 +1817,34 @@ mod tests {
 
     // ── Edge cases: rate limiter boundary ────────────────────
 
-    #[test]
-    fn rate_limit_exactly_at_boundary() {
+    #[tokio::test]
+    async fn rate_limit_exactly_at_boundary() {
         let p = SecurityPolicy {
             max_actions_per_hour: 1,
             ..SecurityPolicy::default()
         };
-        assert!(p.record_action()); // 1 — exactly at limit
-        assert!(!p.record_action()); // 2 — over
-        assert!(!p.record_action()); // 3 — still over
+        assert!(p.record_action().await); // 1 — exactly at limit
+        assert!(!p.record_action().await); // 2 — over
+        assert!(!p.record_action().await); // 3 — still over
     }
 
-    #[test]
-    fn rate_limit_zero_blocks_everything() {
+    #[tokio::test]
+    async fn rate_limit_zero_blocks_everything() {
         let p = SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
         };
-        assert!(!p.record_action());
+        assert!(!p.record_action().await);
     }
 
-    #[test]
-    fn rate_limit_high_allows_many() {
+    #[tokio::test]
+    async fn rate_limit_high_allows_many() {
         let p = SecurityPolicy {
             max_actions_per_hour: 10000,
             ..SecurityPolicy::default()
         };
         for _ in 0..100 {
-            assert!(p.record_action());
+            assert!(p.record_action().await);
         }
     }
 
@@ -1883,8 +1886,8 @@ mod tests {
 
     // ── Edge cases: from_config preserves tracker ────────────
 
-    #[test]
-    fn from_config_creates_fresh_tracker() {
+    #[tokio::test]
+    async fn from_config_creates_fresh_tracker() {
         let autonomy_config = crate::config::AutonomyConfig {
             level: AutonomyLevel::Full,
             workspace_only: false,
@@ -1899,7 +1902,7 @@ mod tests {
         let workspace = PathBuf::from("/tmp/test");
         let policy = SecurityPolicy::from_config(&autonomy_config, &workspace);
         assert_eq!(policy.tracker.count(), 0);
-        assert!(!policy.is_rate_limited());
+        assert!(!policy.is_rate_limited().await);
     }
 
     // ══════════════════════════════════════════════════════════

@@ -81,7 +81,6 @@ rand = "0.10"
 # serde-big-array for wa-rs storage (large array serialization)
 serde-big-array = { version = "0.5", optional = true }
 
-parking_lot = "0.12"
 
 # Async traits
 async-trait = "0.1"

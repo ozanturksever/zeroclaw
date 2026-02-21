@@ -1,5 +1,5 @@
 use chrono::Utc;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -40,11 +40,11 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn upsert_component<F>(component: &str, update: F)
+async fn upsert_component<F>(component: &str, update: F)
 where
     F: FnOnce(&mut ComponentHealth),
 {
-    let mut map = registry().components.lock();
+    let mut map = registry().components.lock().await;
     let now = now_rfc3339();
     let entry = map
         .entry(component.to_string())
@@ -59,31 +59,31 @@ where
     entry.updated_at = now;
 }
 
-pub fn mark_component_ok(component: &str) {
+pub async fn mark_component_ok(component: &str) {
     upsert_component(component, |entry| {
         entry.status = "ok".into();
         entry.last_ok = Some(now_rfc3339());
         entry.last_error = None;
-    });
+    }).await;
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub fn mark_component_error(component: &str, error: impl ToString) {
+pub async fn mark_component_error(component: &str, error: impl ToString) {
     let err = error.to_string();
     upsert_component(component, move |entry| {
         entry.status = "error".into();
         entry.last_error = Some(err);
-    });
+    }).await;
 }
 
-pub fn bump_component_restart(component: &str) {
+pub async fn bump_component_restart(component: &str) {
     upsert_component(component, |entry| {
         entry.restart_count = entry.restart_count.saturating_add(1);
-    });
+    }).await;
 }
 
-pub fn snapshot() -> HealthSnapshot {
-    let components = registry().components.lock().clone();
+pub async fn snapshot() -> HealthSnapshot {
+    let components = registry().components.lock().await.clone();
 
     HealthSnapshot {
         pid: std::process::id(),
@@ -93,8 +93,8 @@ pub fn snapshot() -> HealthSnapshot {
     }
 }
 
-pub fn snapshot_json() -> serde_json::Value {
-    serde_json::to_value(snapshot()).unwrap_or_else(|_| {
+pub async fn snapshot_json() -> serde_json::Value {
+    serde_json::to_value(snapshot().await).unwrap_or_else(|_| {
         serde_json::json!({
             "status": "error",
             "message": "failed to serialize health snapshot"
@@ -110,13 +110,13 @@ mod tests {
         format!("{prefix}-{}", uuid::Uuid::new_v4())
     }
 
-    #[test]
-    fn mark_component_ok_initializes_component_state() {
+    #[tokio::test]
+    async fn mark_component_ok_initializes_component_state() {
         let component = unique_component("health-ok");
 
-        mark_component_ok(&component);
+        mark_component_ok(&component).await;
 
-        let snapshot = snapshot();
+        let snapshot = snapshot().await;
         let entry = snapshot
             .components
             .get(&component)
@@ -127,12 +127,12 @@ mod tests {
         assert!(entry.last_error.is_none());
     }
 
-    #[test]
-    fn mark_component_error_then_ok_clears_last_error() {
+    #[tokio::test]
+    async fn mark_component_error_then_ok_clears_last_error() {
         let component = unique_component("health-error");
 
-        mark_component_error(&component, "first failure");
-        let error_snapshot = snapshot();
+        mark_component_error(&component, "first failure").await;
+        let error_snapshot = snapshot().await;
         let errored = error_snapshot
             .components
             .get(&component)
@@ -140,8 +140,8 @@ mod tests {
         assert_eq!(errored.status, "error");
         assert_eq!(errored.last_error.as_deref(), Some("first failure"));
 
-        mark_component_ok(&component);
-        let recovered_snapshot = snapshot();
+        mark_component_ok(&component).await;
+        let recovered_snapshot = snapshot().await;
         let recovered = recovered_snapshot
             .components
             .get(&component)
@@ -151,14 +151,14 @@ mod tests {
         assert!(recovered.last_ok.is_some());
     }
 
-    #[test]
-    fn bump_component_restart_increments_counter() {
+    #[tokio::test]
+    async fn bump_component_restart_increments_counter() {
         let component = unique_component("health-restart");
 
-        bump_component_restart(&component);
-        bump_component_restart(&component);
+        bump_component_restart(&component).await;
+        bump_component_restart(&component).await;
 
-        let snapshot = snapshot();
+        let snapshot = snapshot().await;
         let entry = snapshot
             .components
             .get(&component)
@@ -167,13 +167,13 @@ mod tests {
         assert_eq!(entry.restart_count, 2);
     }
 
-    #[test]
-    fn snapshot_json_contains_registered_component_fields() {
+    #[tokio::test]
+    async fn snapshot_json_contains_registered_component_fields() {
         let component = unique_component("health-json");
 
-        mark_component_ok(&component);
+        mark_component_ok(&component).await;
 
-        let json = snapshot_json();
+        let json = snapshot_json().await;
         let component_json = &json["components"][&component];
 
         assert_eq!(component_json["status"], "ok");

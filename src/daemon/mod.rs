@@ -15,7 +15,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
         .channel_max_backoff_secs
         .max(initial_backoff);
 
-    crate::health::mark_component_ok("daemon");
+    crate::health::mark_component_ok("daemon").await;
 
     if config.heartbeat.enabled {
         let _ =
@@ -53,7 +53,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
                 },
             ));
         } else {
-            crate::health::mark_component_ok("channels");
+            crate::health::mark_component_ok("channels").await;
             tracing::info!("No real-time channels configured; channel supervisor disabled");
         }
     }
@@ -99,7 +99,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             },
         ));
     } else {
-        crate::health::mark_component_ok("scheduler");
+        crate::health::mark_component_ok("scheduler").await;
         tracing::info!("Cron disabled; scheduler supervisor not started");
     }
 
@@ -109,7 +109,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
     println!("   Ctrl+C to stop");
 
     tokio::signal::ctrl_c().await?;
-    crate::health::mark_component_error("daemon", "shutdown requested");
+    crate::health::mark_component_error("daemon", "shutdown requested").await;
 
     for handle in &handles {
         handle.abort();
@@ -139,7 +139,7 @@ fn spawn_state_writer(config: Config) -> JoinHandle<()> {
         let mut interval = tokio::time::interval(Duration::from_secs(STATUS_FLUSH_SECONDS));
         loop {
             interval.tick().await;
-            let mut json = crate::health::snapshot_json();
+            let mut json = crate::health::snapshot_json().await;
             if let Some(obj) = json.as_object_mut() {
                 obj.insert(
                     "written_at".into(),
@@ -167,21 +167,21 @@ where
         let max_backoff = max_backoff_secs.max(backoff);
 
         loop {
-            crate::health::mark_component_ok(name);
+            crate::health::mark_component_ok(name).await;
             match run_component().await {
                 Ok(()) => {
-                    crate::health::mark_component_error(name, "component exited unexpectedly");
+                    crate::health::mark_component_error(name, "component exited unexpectedly").await;
                     tracing::warn!("Daemon component '{name}' exited unexpectedly");
                     // Clean exit — reset backoff since the component ran successfully
                     backoff = initial_backoff_secs.max(1);
                 }
                 Err(e) => {
-                    crate::health::mark_component_error(name, e.to_string());
+                    crate::health::mark_component_error(name, e.to_string()).await;
                     tracing::error!("Daemon component '{name}' failed: {e}");
                 }
             }
 
-            crate::health::bump_component_restart(name);
+            crate::health::bump_component_restart(name).await;
             tokio::time::sleep(Duration::from_secs(backoff)).await;
             // Double backoff AFTER sleeping so first error uses initial_backoff
             backoff = backoff.saturating_mul(2).min(max_backoff);
@@ -223,10 +223,10 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
             )
             .await
             {
-                crate::health::mark_component_error("heartbeat", e.to_string());
+                crate::health::mark_component_error("heartbeat", e.to_string()).await;
                 tracing::warn!("Heartbeat task failed: {e}");
             } else {
-                crate::health::mark_component_ok("heartbeat");
+                crate::health::mark_component_ok("heartbeat").await;
             }
         }
     }
@@ -274,7 +274,7 @@ mod tests {
         handle.abort();
         let _ = handle.await;
 
-        let snapshot = crate::health::snapshot_json();
+        let snapshot = crate::health::snapshot_json().await;
         let component = &snapshot["components"]["daemon-test-fail"];
         assert_eq!(component["status"], "error");
         assert!(component["restart_count"].as_u64().unwrap_or(0) >= 1);
@@ -292,7 +292,7 @@ mod tests {
         handle.abort();
         let _ = handle.await;
 
-        let snapshot = crate::health::snapshot_json();
+        let snapshot = crate::health::snapshot_json().await;
         let component = &snapshot["components"]["daemon-test-exit"];
         assert_eq!(component["status"], "error");
         assert!(component["restart_count"].as_u64().unwrap_or(0) >= 1);

@@ -2,7 +2,7 @@ use super::types::{BudgetCheck, CostRecord, CostSummary, ModelStats, TokenUsage,
 use crate::config::schema::CostConfig;
 use anyhow::{anyhow, Context, Result};
 use chrono::{Datelike, NaiveDate, Utc};
-use parking_lot::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -39,16 +39,16 @@ impl CostTracker {
         &self.session_id
     }
 
-    fn lock_storage(&self) -> MutexGuard<'_, CostStorage> {
-        self.storage.lock()
+    async fn lock_storage(&self) -> MutexGuard<'_, CostStorage> {
+        self.storage.lock().await
     }
 
-    fn lock_session_costs(&self) -> MutexGuard<'_, Vec<CostRecord>> {
-        self.session_costs.lock()
+    async fn lock_session_costs(&self) -> MutexGuard<'_, Vec<CostRecord>> {
+        self.session_costs.lock().await
     }
 
     /// Check if a request is within budget.
-    pub fn check_budget(&self, estimated_cost_usd: f64) -> Result<BudgetCheck> {
+    pub async fn check_budget(&self, estimated_cost_usd: f64) -> Result<BudgetCheck> {
         if !self.config.enabled {
             return Ok(BudgetCheck::Allowed);
         }
@@ -59,7 +59,7 @@ impl CostTracker {
             ));
         }
 
-        let mut storage = self.lock_storage();
+        let mut storage = self.lock_storage().await;
         let (daily_cost, monthly_cost) = storage.get_aggregated_costs()?;
 
         // Check daily limit
@@ -107,7 +107,7 @@ impl CostTracker {
     }
 
     /// Record a usage event.
-    pub fn record_usage(&self, usage: TokenUsage) -> Result<()> {
+    pub async fn record_usage(&self, usage: TokenUsage) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
         }
@@ -122,25 +122,25 @@ impl CostTracker {
 
         // Persist first for durability guarantees.
         {
-            let mut storage = self.lock_storage();
+            let mut storage = self.lock_storage().await;
             storage.add_record(record.clone())?;
         }
 
         // Then update in-memory session snapshot.
-        let mut session_costs = self.lock_session_costs();
+        let mut session_costs = self.lock_session_costs().await;
         session_costs.push(record);
 
         Ok(())
     }
 
     /// Get the current cost summary.
-    pub fn get_summary(&self) -> Result<CostSummary> {
+    pub async fn get_summary(&self) -> Result<CostSummary> {
         let (daily_cost, monthly_cost) = {
-            let mut storage = self.lock_storage();
+            let mut storage = self.lock_storage().await;
             storage.get_aggregated_costs()?
         };
 
-        let session_costs = self.lock_session_costs();
+        let session_costs = self.lock_session_costs().await;
         let session_cost: f64 = session_costs
             .iter()
             .map(|record| record.usage.cost_usd)
@@ -163,14 +163,14 @@ impl CostTracker {
     }
 
     /// Get the daily cost for a specific date.
-    pub fn get_daily_cost(&self, date: NaiveDate) -> Result<f64> {
-        let storage = self.lock_storage();
+    pub async fn get_daily_cost(&self, date: NaiveDate) -> Result<f64> {
+        let storage = self.lock_storage().await;
         storage.get_cost_for_date(date)
     }
 
     /// Get the monthly cost for a specific month.
-    pub fn get_monthly_cost(&self, year: i32, month: u32) -> Result<f64> {
-        let storage = self.lock_storage();
+    pub async fn get_monthly_cost(&self, year: i32, month: u32) -> Result<f64> {
+        let storage = self.lock_storage().await;
         storage.get_cost_for_month(year, month)
     }
 }
@@ -420,8 +420,8 @@ mod tests {
         assert!(!tracker.session_id().is_empty());
     }
 
-    #[test]
-    fn budget_check_when_disabled() {
+    #[tokio::test]
+    async fn budget_check_when_disabled() {
         let tmp = TempDir::new().unwrap();
         let config = CostConfig {
             enabled: false,
@@ -429,26 +429,26 @@ mod tests {
         };
 
         let tracker = CostTracker::new(config, tmp.path()).unwrap();
-        let check = tracker.check_budget(1000.0).unwrap();
+        let check = tracker.check_budget(1000.0).await.unwrap();
         assert!(matches!(check, BudgetCheck::Allowed));
     }
 
-    #[test]
-    fn record_usage_and_get_summary() {
+    #[tokio::test]
+    async fn record_usage_and_get_summary() {
         let tmp = TempDir::new().unwrap();
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
 
         let usage = TokenUsage::new("test/model", 1000, 500, 1.0, 2.0);
-        tracker.record_usage(usage).unwrap();
+        tracker.record_usage(usage).await.unwrap();
 
-        let summary = tracker.get_summary().unwrap();
+        let summary = tracker.get_summary().await.unwrap();
         assert_eq!(summary.request_count, 1);
         assert!(summary.session_cost_usd > 0.0);
         assert_eq!(summary.by_model.len(), 1);
     }
 
-    #[test]
-    fn budget_exceeded_daily_limit() {
+    #[tokio::test]
+    async fn budget_exceeded_daily_limit() {
         let tmp = TempDir::new().unwrap();
         let config = CostConfig {
             enabled: true,
@@ -460,14 +460,14 @@ mod tests {
 
         // Record a usage that exceeds the limit
         let usage = TokenUsage::new("test/model", 10000, 5000, 1.0, 2.0); // ~0.02 USD
-        tracker.record_usage(usage).unwrap();
+        tracker.record_usage(usage).await.unwrap();
 
-        let check = tracker.check_budget(0.01).unwrap();
+        let check = tracker.check_budget(0.01).await.unwrap();
         assert!(matches!(check, BudgetCheck::Exceeded { .. }));
     }
 
-    #[test]
-    fn summary_by_model_is_session_scoped() {
+    #[tokio::test]
+    async fn summary_by_model_is_session_scoped() {
         let tmp = TempDir::new().unwrap();
         let storage_path = resolve_storage_path(tmp.path()).unwrap();
         if let Some(parent) = storage_path.parent() {
@@ -489,16 +489,17 @@ mod tests {
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
         tracker
             .record_usage(TokenUsage::new("session/model", 1000, 1000, 1.0, 1.0))
+            .await
             .unwrap();
 
-        let summary = tracker.get_summary().unwrap();
+        let summary = tracker.get_summary().await.unwrap();
         assert_eq!(summary.by_model.len(), 1);
         assert!(summary.by_model.contains_key("session/model"));
         assert!(!summary.by_model.contains_key("legacy/model"));
     }
 
-    #[test]
-    fn malformed_lines_are_ignored_while_loading() {
+    #[tokio::test]
+    async fn malformed_lines_are_ignored_while_loading() {
         let tmp = TempDir::new().unwrap();
         let storage_path = resolve_storage_path(tmp.path()).unwrap();
         if let Some(parent) = storage_path.parent() {
@@ -519,16 +520,16 @@ mod tests {
         file.sync_all().unwrap();
 
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
-        let today_cost = tracker.get_daily_cost(Utc::now().date_naive()).unwrap();
+        let today_cost = tracker.get_daily_cost(Utc::now().date_naive()).await.unwrap();
         assert!((today_cost - valid_usage.cost_usd).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn invalid_budget_estimate_is_rejected() {
+    #[tokio::test]
+    async fn invalid_budget_estimate_is_rejected() {
         let tmp = TempDir::new().unwrap();
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
 
-        let err = tracker.check_budget(f64::NAN).unwrap_err();
+        let err = tracker.check_budget(f64::NAN).await.unwrap_err();
         assert!(err
             .to_string()
             .contains("Estimated cost must be a finite, non-negative value"));

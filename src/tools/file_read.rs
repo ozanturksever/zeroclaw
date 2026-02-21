@@ -54,7 +54,7 @@ impl Tool for FileReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
 
-        if self.security.is_rate_limited() {
+        if self.security.is_rate_limited().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -74,7 +74,7 @@ impl Tool for FileReadTool {
         // Record action BEFORE canonicalization so that every non-trivially-rejected
         // request consumes rate limit budget. This prevents attackers from probing
         // path existence (via canonicalize errors) without rate limit cost.
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

@@ -38,7 +38,7 @@ impl ProxyConfigTool {
         Ok(parsed)
     }
 
-    fn require_write_access(&self) -> Option<ToolResult> {
+    async fn require_write_access(&self) -> Option<ToolResult> {
         if !self.security.can_act() {
             return Some(ToolResult {
                 success: false,
@@ -47,7 +47,7 @@ impl ProxyConfigTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -407,7 +407,7 @@ impl Tool for ProxyConfigTool {
             "get" => self.handle_get(),
             "list_services" => self.handle_list_services(),
             "set" | "disable" | "apply_env" | "clear_env" => {
-                if let Some(blocked) = self.require_write_access() {
+                if let Some(blocked) = self.require_write_access().await {
                     return Ok(blocked);
                 }
 

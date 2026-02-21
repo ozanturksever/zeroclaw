@@ -28,7 +28,7 @@ pub async fn run(config: Config) -> Result<()> {
         &config.workspace_dir,
     ));
 
-    crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+    crate::health::mark_component_ok(SCHEDULER_COMPONENT).await;
 
     loop {
         interval.tick().await;
@@ -38,7 +38,7 @@ pub async fn run(config: Config) -> Result<()> {
         let jobs = match due_jobs(&config, Utc::now()) {
             Ok(jobs) => jobs,
             Err(e) => {
-                crate::health::mark_component_error(SCHEDULER_COMPONENT, e.to_string());
+                crate::health::mark_component_error(SCHEDULER_COMPONENT, e.to_string()).await;
                 tracing::warn!("Scheduler query failed: {e}");
                 continue;
             }
@@ -124,7 +124,7 @@ async fn execute_and_persist_job(
     job: &CronJob,
     component: &str,
 ) -> (String, bool) {
-    crate::health::mark_component_ok(component);
+    crate::health::mark_component_ok(component).await;
     warn_if_high_frequency_agent_job(job);
 
     let started_at = Utc::now();
@@ -388,7 +388,7 @@ async fn run_job_command_with_timeout(
         );
     }
 
-    if security.is_rate_limited() {
+    if security.is_rate_limited().await {
         return (
             false,
             "blocked by security policy: rate limit exceeded".to_string(),
@@ -412,7 +412,7 @@ async fn run_job_command_with_timeout(
         );
     }
 
-    if !security.record_action() {
+    if !security.record_action().await {
         return (
             false,
             "blocked by security policy: action budget exhausted".to_string(),

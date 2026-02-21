@@ -184,7 +184,7 @@ mod tests {
     struct MockProvider {
         calls: Arc<AtomicUsize>,
         response: &'static str,
-        last_model: parking_lot::Mutex<String>,
+        last_model: tokio::sync::Mutex<String>,
     }
 
     impl MockProvider {
@@ -192,7 +192,7 @@ mod tests {
             Self {
                 calls: Arc::new(AtomicUsize::new(0)),
                 response,
-                last_model: parking_lot::Mutex::new(String::new()),
+                last_model: tokio::sync::Mutex::new(String::new()),
             }
         }
 
@@ -200,8 +200,8 @@ mod tests {
             self.calls.load(Ordering::SeqCst)
         }
 
-        fn last_model(&self) -> String {
-            self.last_model.lock().clone()
+        async fn last_model(&self) -> String {
+            self.last_model.lock().await.clone()
         }
     }
 
@@ -215,7 +215,7 @@ mod tests {
             _temperature: f64,
         ) -> anyhow::Result<String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            *self.last_model.lock() = model.to_string();
+            *self.last_model.lock().await = model.to_string();
             Ok(self.response.to_string())
         }
     }
@@ -290,7 +290,7 @@ mod tests {
             .unwrap();
         assert_eq!(result, "smart-response");
         assert_eq!(mocks[1].call_count(), 1);
-        assert_eq!(mocks[1].last_model(), "claude-opus");
+        assert_eq!(mocks[1].last_model().await, "claude-opus");
         assert_eq!(mocks[0].call_count(), 0);
     }
 
@@ -304,7 +304,7 @@ mod tests {
         let result = router.simple_chat("hello", "hint:fast", 0.5).await.unwrap();
         assert_eq!(result, "fast-response");
         assert_eq!(mocks[0].call_count(), 1);
-        assert_eq!(mocks[0].last_model(), "llama-3-70b");
+        assert_eq!(mocks[0].last_model().await, "llama-3-70b");
     }
 
     #[tokio::test]
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(result, "default-response");
         assert_eq!(mocks[0].call_count(), 1);
         // Falls back to default with the hint as model name
-        assert_eq!(mocks[0].last_model(), "hint:nonexistent");
+        assert_eq!(mocks[0].last_model().await, "hint:nonexistent");
     }
 
     #[tokio::test]
@@ -340,7 +340,7 @@ mod tests {
             .unwrap();
         assert_eq!(result, "primary-response");
         assert_eq!(mocks[0].call_count(), 1);
-        assert_eq!(mocks[0].last_model(), "anthropic/claude-sonnet-4-20250514");
+        assert_eq!(mocks[0].last_model().await, "anthropic/claude-sonnet-4-20250514");
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.text.as_deref(), Some("tool-response"));
         assert_eq!(mock.call_count(), 1);
-        assert_eq!(mock.last_model(), "model");
+        assert_eq!(mock.last_model().await, "model");
     }
 
     #[tokio::test]
@@ -458,7 +458,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.text.as_deref(), Some("smart-tool"));
         assert_eq!(mocks[1].call_count(), 1);
-        assert_eq!(mocks[1].last_model(), "claude-opus");
+        assert_eq!(mocks[1].last_model().await, "claude-opus");
         assert_eq!(mocks[0].call_count(), 0);
     }
 }

@@ -1385,7 +1385,7 @@ fn spawn_supervised_listener_with_health_interval(
         let max_backoff = max_backoff_secs.max(backoff);
 
         loop {
-            crate::health::mark_component_ok(&component);
+            crate::health::mark_component_ok(&component).await;
             let mut health = tokio::time::interval(health_interval);
             health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let result = {
@@ -1395,7 +1395,7 @@ fn spawn_supervised_listener_with_health_interval(
                 loop {
                     tokio::select! {
                         _ = health.tick() => {
-                            crate::health::mark_component_ok(&component);
+                            crate::health::mark_component_ok(&component).await;
                         }
                         result = &mut listen_future => break result,
                     }
@@ -1409,17 +1409,17 @@ fn spawn_supervised_listener_with_health_interval(
             match result {
                 Ok(()) => {
                     tracing::warn!("Channel {} exited unexpectedly; restarting", ch.name());
-                    crate::health::mark_component_error(&component, "listener exited unexpectedly");
+                    crate::health::mark_component_error(&component, "listener exited unexpectedly").await;
                     // Clean exit — reset backoff since the listener ran successfully
                     backoff = initial_backoff_secs.max(1);
                 }
                 Err(e) => {
                     tracing::error!("Channel {} error: {e}; restarting", ch.name());
-                    crate::health::mark_component_error(&component, e.to_string());
+                    crate::health::mark_component_error(&component, e.to_string()).await;
                 }
             }
 
-            crate::health::bump_component_restart(&component);
+            crate::health::bump_component_restart(&component).await;
             tokio::time::sleep(Duration::from_secs(backoff)).await;
             // Double backoff AFTER sleeping so first error uses initial_backoff
             backoff = backoff.saturating_mul(2).min(max_backoff);
@@ -3173,7 +3173,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     println!("  Listening for messages... (Ctrl+C to stop)");
     println!();
 
-    crate::health::mark_component_ok("channels");
+    crate::health::mark_component_ok("channels").await;
 
     let initial_backoff_secs = config
         .reliability
@@ -6232,7 +6232,7 @@ This is an example JSON object for profile settings."#;
         handle.abort();
         let _ = handle.await;
 
-        let snapshot = crate::health::snapshot_json();
+        let snapshot = crate::health::snapshot_json().await;
         let component = &snapshot["components"]["channel:test-supervised-fail"];
         assert_eq!(component["status"], "error");
         assert!(component["restart_count"].as_u64().unwrap_or(0) >= 1);

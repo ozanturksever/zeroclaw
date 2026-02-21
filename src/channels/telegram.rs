@@ -4,7 +4,7 @@ use crate::security::pairing::PairingGuard;
 use anyhow::Context;
 use async_trait::async_trait;
 use directories::UserDirs;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use reqwest::multipart::{Form, Part};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -505,7 +505,7 @@ impl TelegramChannel {
 
     async fn get_bot_username(&self) -> Option<String> {
         {
-            let cache = self.bot_username.lock();
+            let cache = self.bot_username.lock().await;
             if let Some(ref username) = *cache {
                 return Some(username.clone());
             }
@@ -513,7 +513,7 @@ impl TelegramChannel {
 
         match self.fetch_bot_username().await {
             Ok(username) => {
-                let mut cache = self.bot_username.lock();
+                let mut cache = self.bot_username.lock().await;
                 *cache = Some(username.clone());
                 Some(username)
             }
@@ -1219,7 +1219,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
 
         let is_group = Self::is_group_message(message);
         if self.mention_only && is_group {
-            let bot_username = self.bot_username.lock();
+            let bot_username = self.bot_username.lock().await;
             if let Some(ref bot_username) = *bot_username {
                 if !Self::contains_bot_mention(&text, bot_username) {
                     return None;
@@ -1254,7 +1254,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         };
 
         let content = if self.mention_only && is_group {
-            let bot_username = self.bot_username.lock();
+            let bot_username = self.bot_username.lock().await;
             let bot_username = bot_username.as_ref()?;
             Self::normalize_incoming_content(&text, bot_username)?
         } else {
@@ -2145,7 +2145,7 @@ impl Channel for TelegramChannel {
             .map(|id| id.to_string());
 
         self.last_draft_edit
-            .lock()
+            .lock().await
             .insert(chat_id.to_string(), std::time::Instant::now());
 
         Ok(message_id)
@@ -2161,7 +2161,7 @@ impl Channel for TelegramChannel {
 
         // Rate-limit edits per chat
         {
-            let last_edits = self.last_draft_edit.lock();
+            let last_edits = self.last_draft_edit.lock().await;
             if let Some(last_time) = last_edits.get(&chat_id) {
                 let elapsed = u64::try_from(last_time.elapsed().as_millis()).unwrap_or(u64::MAX);
                 if elapsed < self.draft_update_interval_ms {
@@ -2208,7 +2208,7 @@ impl Channel for TelegramChannel {
 
         if resp.status().is_success() {
             self.last_draft_edit
-                .lock()
+                .lock().await
                 .insert(chat_id.clone(), std::time::Instant::now());
         } else {
             let status = resp.status();
@@ -2229,7 +2229,7 @@ impl Channel for TelegramChannel {
         let (chat_id, thread_id) = Self::parse_reply_target(recipient);
 
         // Clean up rate-limit tracking for this chat
-        self.last_draft_edit.lock().remove(&chat_id);
+        self.last_draft_edit.lock().await.remove(&chat_id);
 
         // If text exceeds limit, delete draft and send as chunked messages
         if text.len() > TELEGRAM_MAX_MESSAGE_LENGTH {
@@ -2389,7 +2389,7 @@ impl Channel for TelegramChannel {
 
         loop {
             if self.mention_only {
-                let missing_username = self.bot_username.lock().is_none();
+                let missing_username = self.bot_username.lock().await.is_none();
                 if missing_username {
                     let _ = self.get_bot_username().await;
                 }
@@ -2457,7 +2457,7 @@ Ensure only one `zeroclaw` process is using this bot token."
                         offset = uid + 1;
                     }
 
-                    let msg = if let Some(m) = self.parse_update_message(update) {
+                    let msg = if let Some(m) = self.parse_update_message(update).await {
                         m
                     } else if let Some(m) = self.try_parse_voice_message(update).await {
                         m
@@ -2537,14 +2537,14 @@ Ensure only one `zeroclaw` process is using this bot token."
             }
         });
 
-        let mut guard = self.typing_handle.lock();
+        let mut guard = self.typing_handle.lock().await;
         *guard = Some(handle);
 
         Ok(())
     }
 
     async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
-        let mut guard = self.typing_handle.lock();
+        let mut guard = self.typing_handle.lock().await;
         if let Some(handle) = guard.take() {
             handle.abort();
         }
@@ -2596,7 +2596,7 @@ mod tests {
     #[tokio::test]
     async fn typing_handle_starts_as_none() {
         let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await;
-        let guard = ch.typing_handle.lock();
+        let guard = ch.typing_handle.lock().await;
         assert!(guard.is_none());
     }
 
@@ -2606,7 +2606,7 @@ mod tests {
 
         // Manually insert a dummy handle
         {
-            let mut guard = ch.typing_handle.lock();
+            let mut guard = ch.typing_handle.lock().await;
             *guard = Some(tokio::spawn(async {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }));
@@ -2615,7 +2615,7 @@ mod tests {
         // stop_typing should abort and clear
         ch.stop_typing("123").await.unwrap();
 
-        let guard = ch.typing_handle.lock();
+        let guard = ch.typing_handle.lock().await;
         assert!(guard.is_none());
     }
 
@@ -2625,7 +2625,7 @@ mod tests {
 
         // Insert a dummy handle first
         {
-            let mut guard = ch.typing_handle.lock();
+            let mut guard = ch.typing_handle.lock().await;
             *guard = Some(tokio::spawn(async {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }));
@@ -2634,7 +2634,7 @@ mod tests {
         // start_typing should abort the old handle and set a new one
         let _ = ch.start_typing("123").await;
 
-        let guard = ch.typing_handle.lock();
+        let guard = ch.typing_handle.lock().await;
         assert!(guard.is_some());
     }
 
@@ -2664,7 +2664,7 @@ mod tests {
         let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await
             .with_streaming(StreamMode::Partial, 60_000);
         ch.last_draft_edit
-            .lock()
+            .lock().await
             .insert("123".to_string(), std::time::Instant::now());
 
         let result = ch.update_draft("123", "42", "delta text").await;
@@ -2904,7 +2904,7 @@ mod tests {
         });
 
         let msg = ch
-            .parse_update_message(&update)
+            .parse_update_message(&update).await
             .expect("message should parse");
 
         assert_eq!(msg.sender, "alice");
@@ -2931,7 +2931,7 @@ mod tests {
         });
 
         let msg = ch
-            .parse_update_message(&update)
+            .parse_update_message(&update).await
             .expect("numeric allowlist should pass");
 
         assert_eq!(msg.sender, "555");
@@ -2958,7 +2958,7 @@ mod tests {
         });
 
         let msg = ch
-            .parse_update_message(&update)
+            .parse_update_message(&update).await
             .expect("message with thread_id should parse");
 
         assert_eq!(msg.sender, "alice");
@@ -3523,7 +3523,7 @@ mod tests {
     async fn parse_update_message_mention_only_group_requires_exact_mention() {
         let ch = TelegramChannel::new("token".into(), vec!["*".into()], true).await;
         {
-            let mut cache = ch.bot_username.lock();
+            let mut cache = ch.bot_username.lock().await;
             *cache = Some("mybot".to_string());
         }
 
@@ -3543,14 +3543,14 @@ mod tests {
             }
         });
 
-        assert!(ch.parse_update_message(&update).is_none());
+        assert!(ch.parse_update_message(&update).await.is_none());
     }
 
     #[tokio::test]
     async fn parse_update_message_mention_only_group_strips_mention_and_drops_empty() {
         let ch = TelegramChannel::new("token".into(), vec!["*".into()], true).await;
         {
-            let mut cache = ch.bot_username.lock();
+            let mut cache = ch.bot_username.lock().await;
             *cache = Some("mybot".to_string());
         }
 
@@ -3571,7 +3571,7 @@ mod tests {
         });
 
         let parsed = ch
-            .parse_update_message(&update)
+            .parse_update_message(&update).await
             .expect("mention should parse");
         assert_eq!(parsed.content, "Hi status please");
 
@@ -3591,7 +3591,7 @@ mod tests {
             }
         });
 
-        assert!(ch.parse_update_message(&empty_update).is_none());
+        assert!(ch.parse_update_message(&empty_update).await.is_none());
     }
 
     #[test]

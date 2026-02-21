@@ -1,7 +1,7 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use serde_json::json;
 use std::collections::HashMap;
 use tokio_tungstenite::tungstenite::Message;
@@ -595,14 +595,14 @@ impl Channel for DiscordChannel {
             }
         });
 
-        let mut guard = self.typing_handles.lock();
+        let mut guard = self.typing_handles.lock().await;
         guard.insert(recipient.to_string(), handle);
 
         Ok(())
     }
 
     async fn stop_typing(&self, recipient: &str) -> anyhow::Result<()> {
-        let mut guard = self.typing_handles.lock();
+        let mut guard = self.typing_handles.lock().await;
         if let Some(handle) = guard.remove(recipient) {
             handle.abort();
         }
@@ -946,10 +946,10 @@ mod tests {
         assert_eq!(reconstructed, msg);
     }
 
-    #[test]
-    fn typing_handles_start_empty() {
+    #[tokio::test]
+    async fn typing_handles_start_empty() {
         let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
-        let guard = ch.typing_handles.lock();
+        let guard = ch.typing_handles.lock().await;
         assert!(guard.is_empty());
     }
 
@@ -957,7 +957,7 @@ mod tests {
     async fn start_typing_sets_handle() {
         let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
         let _ = ch.start_typing("123456").await;
-        let guard = ch.typing_handles.lock();
+        let guard = ch.typing_handles.lock().await;
         assert!(guard.contains_key("123456"));
     }
 
@@ -966,7 +966,7 @@ mod tests {
         let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
         let _ = ch.start_typing("123456").await;
         let _ = ch.stop_typing("123456").await;
-        let guard = ch.typing_handles.lock();
+        let guard = ch.typing_handles.lock().await;
         assert!(!guard.contains_key("123456"));
     }
 
@@ -983,14 +983,14 @@ mod tests {
         let _ = ch.start_typing("111").await;
         let _ = ch.start_typing("222").await;
         {
-            let guard = ch.typing_handles.lock();
+            let guard = ch.typing_handles.lock().await;
             assert_eq!(guard.len(), 2);
             assert!(guard.contains_key("111"));
             assert!(guard.contains_key("222"));
         }
         // Stopping one does not affect the other
         let _ = ch.stop_typing("111").await;
-        let guard = ch.typing_handles.lock();
+        let guard = ch.typing_handles.lock().await;
         assert_eq!(guard.len(), 1);
         assert!(guard.contains_key("222"));
     }

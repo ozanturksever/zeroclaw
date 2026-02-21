@@ -85,7 +85,7 @@ impl Tool for ScheduleTool {
                 self.handle_get(id)
             }
             "create" | "add" | "once" => {
-                if let Some(blocked) = self.enforce_mutation_allowed(action) {
+                if let Some(blocked) = self.enforce_mutation_allowed(action).await {
                     return Ok(blocked);
                 }
                 let approved = args
@@ -95,7 +95,7 @@ impl Tool for ScheduleTool {
                 self.handle_create_like(action, &args, approved)
             }
             "cancel" | "remove" => {
-                if let Some(blocked) = self.enforce_mutation_allowed(action) {
+                if let Some(blocked) = self.enforce_mutation_allowed(action).await {
                     return Ok(blocked);
                 }
                 let id = args
@@ -105,7 +105,7 @@ impl Tool for ScheduleTool {
                 Ok(self.handle_cancel(id))
             }
             "pause" => {
-                if let Some(blocked) = self.enforce_mutation_allowed(action) {
+                if let Some(blocked) = self.enforce_mutation_allowed(action).await {
                     return Ok(blocked);
                 }
                 let id = args
@@ -115,7 +115,7 @@ impl Tool for ScheduleTool {
                 Ok(self.handle_pause_resume(id, true))
             }
             "resume" => {
-                if let Some(blocked) = self.enforce_mutation_allowed(action) {
+                if let Some(blocked) = self.enforce_mutation_allowed(action).await {
                     return Ok(blocked);
                 }
                 let id = args
@@ -136,7 +136,7 @@ impl Tool for ScheduleTool {
 }
 
 impl ScheduleTool {
-    fn enforce_mutation_allowed(&self, action: &str) -> Option<ToolResult> {
+    async fn enforce_mutation_allowed(&self, action: &str) -> Option<ToolResult> {
         if !self.config.cron.enabled {
             return Some(ToolResult {
                 success: false,
@@ -157,7 +157,7 @@ impl ScheduleTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
