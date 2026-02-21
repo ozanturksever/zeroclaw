@@ -4,7 +4,7 @@ use crate::security::pairing::PairingGuard;
 use anyhow::Context;
 use async_trait::async_trait;
 use directories::UserDirs;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 use reqwest::multipart::{Form, Part};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -505,7 +505,7 @@ impl TelegramChannel {
 
     async fn get_bot_username(&self) -> Option<String> {
         {
-            let cache = self.bot_username.lock().await;
+            let cache = self.bot_username.lock().unwrap();
             if let Some(ref username) = *cache {
                 return Some(username.clone());
             }
@@ -513,7 +513,7 @@ impl TelegramChannel {
 
         match self.fetch_bot_username().await {
             Ok(username) => {
-                let mut cache = self.bot_username.lock().await;
+                let mut cache = self.bot_username.lock().unwrap();
                 *cache = Some(username.clone());
                 Some(username)
             }
@@ -1098,7 +1098,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
 
         // Cache transcription for reply-context lookups
         {
-            let mut cache = self.voice_transcriptions.lock();
+            let mut cache = self.voice_transcriptions.lock().unwrap();
             if cache.len() >= 100 {
                 cache.clear();
             }
@@ -1172,7 +1172,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 .and_then(serde_json::Value::as_i64);
             if let (Some(mid), Some(cid)) = (reply_mid, chat_id) {
                 self.voice_transcriptions
-                    .lock()
+                    .lock().unwrap()
                     .get(&format!("{cid}:{mid}"))
                     .map(|t| format!("[Voice] {t}"))
                     .unwrap_or_else(|| "[Voice message]".to_string())
@@ -1219,7 +1219,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
 
         let is_group = Self::is_group_message(message);
         if self.mention_only && is_group {
-            let bot_username = self.bot_username.lock().await;
+            let bot_username = self.bot_username.lock().unwrap();
             if let Some(ref bot_username) = *bot_username {
                 if !Self::contains_bot_mention(&text, bot_username) {
                     return None;
@@ -1254,7 +1254,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         };
 
         let content = if self.mention_only && is_group {
-            let bot_username = self.bot_username.lock().await;
+            let bot_username = self.bot_username.lock().unwrap();
             let bot_username = bot_username.as_ref()?;
             Self::normalize_incoming_content(&text, bot_username)?
         } else {
@@ -2145,7 +2145,7 @@ impl Channel for TelegramChannel {
             .map(|id| id.to_string());
 
         self.last_draft_edit
-            .lock().await
+            .lock().unwrap()
             .insert(chat_id.to_string(), std::time::Instant::now());
 
         Ok(message_id)
@@ -2161,7 +2161,7 @@ impl Channel for TelegramChannel {
 
         // Rate-limit edits per chat
         {
-            let last_edits = self.last_draft_edit.lock().await;
+            let last_edits = self.last_draft_edit.lock().unwrap();
             if let Some(last_time) = last_edits.get(&chat_id) {
                 let elapsed = u64::try_from(last_time.elapsed().as_millis()).unwrap_or(u64::MAX);
                 if elapsed < self.draft_update_interval_ms {
@@ -2208,7 +2208,7 @@ impl Channel for TelegramChannel {
 
         if resp.status().is_success() {
             self.last_draft_edit
-                .lock().await
+                .lock().unwrap()
                 .insert(chat_id.clone(), std::time::Instant::now());
         } else {
             let status = resp.status();
@@ -2229,7 +2229,7 @@ impl Channel for TelegramChannel {
         let (chat_id, thread_id) = Self::parse_reply_target(recipient);
 
         // Clean up rate-limit tracking for this chat
-        self.last_draft_edit.lock().await.remove(&chat_id);
+        self.last_draft_edit.lock().unwrap().remove(&chat_id);
 
         // If text exceeds limit, delete draft and send as chunked messages
         if text.len() > TELEGRAM_MAX_MESSAGE_LENGTH {
@@ -2315,7 +2315,7 @@ impl Channel for TelegramChannel {
 
     async fn cancel_draft(&self, recipient: &str, message_id: &str) -> anyhow::Result<()> {
         let (chat_id, _) = Self::parse_reply_target(recipient);
-        self.last_draft_edit.lock().remove(&chat_id);
+        self.last_draft_edit.lock().unwrap().remove(&chat_id);
 
         let message_id = match message_id.parse::<i64>() {
             Ok(id) => id,
@@ -2389,7 +2389,7 @@ impl Channel for TelegramChannel {
 
         loop {
             if self.mention_only {
-                let missing_username = self.bot_username.lock().await.is_none();
+                let missing_username = self.bot_username.lock().unwrap().is_none();
                 if missing_username {
                     let _ = self.get_bot_username().await;
                 }
@@ -2457,7 +2457,7 @@ Ensure only one `zeroclaw` process is using this bot token."
                         offset = uid + 1;
                     }
 
-                    let msg = if let Some(m) = self.parse_update_message(update).await {
+                    let msg = if let Some(m) = self.parse_update_message(update) {
                         m
                     } else if let Some(m) = self.try_parse_voice_message(update).await {
                         m
@@ -2537,14 +2537,14 @@ Ensure only one `zeroclaw` process is using this bot token."
             }
         });
 
-        let mut guard = self.typing_handle.lock().await;
+        let mut guard = self.typing_handle.lock().unwrap();
         *guard = Some(handle);
 
         Ok(())
     }
 
     async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
-        let mut guard = self.typing_handle.lock().await;
+        let mut guard = self.typing_handle.lock().unwrap();
         if let Some(handle) = guard.take() {
             handle.abort();
         }
@@ -2596,7 +2596,7 @@ mod tests {
     #[tokio::test]
     async fn typing_handle_starts_as_none() {
         let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await;
-        let guard = ch.typing_handle.lock().await;
+        let guard = ch.typing_handle.lock().unwrap();
         assert!(guard.is_none());
     }
 
@@ -2606,7 +2606,7 @@ mod tests {
 
         // Manually insert a dummy handle
         {
-            let mut guard = ch.typing_handle.lock().await;
+            let mut guard = ch.typing_handle.lock().unwrap();
             *guard = Some(tokio::spawn(async {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }));
@@ -2615,7 +2615,7 @@ mod tests {
         // stop_typing should abort and clear
         ch.stop_typing("123").await.unwrap();
 
-        let guard = ch.typing_handle.lock().await;
+        let guard = ch.typing_handle.lock().unwrap();
         assert!(guard.is_none());
     }
 
@@ -2625,7 +2625,7 @@ mod tests {
 
         // Insert a dummy handle first
         {
-            let mut guard = ch.typing_handle.lock().await;
+            let mut guard = ch.typing_handle.lock().unwrap();
             *guard = Some(tokio::spawn(async {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }));
@@ -2634,7 +2634,7 @@ mod tests {
         // start_typing should abort the old handle and set a new one
         let _ = ch.start_typing("123").await;
 
-        let guard = ch.typing_handle.lock().await;
+        let guard = ch.typing_handle.lock().unwrap();
         assert!(guard.is_some());
     }
 
@@ -2664,7 +2664,7 @@ mod tests {
         let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await
             .with_streaming(StreamMode::Partial, 60_000);
         ch.last_draft_edit
-            .lock().await
+            .lock().unwrap()
             .insert("123".to_string(), std::time::Instant::now());
 
         let result = ch.update_draft("123", "42", "delta text").await;
@@ -2904,7 +2904,7 @@ mod tests {
         });
 
         let msg = ch
-            .parse_update_message(&update).await
+            .parse_update_message(&update)
             .expect("message should parse");
 
         assert_eq!(msg.sender, "alice");
@@ -2931,7 +2931,7 @@ mod tests {
         });
 
         let msg = ch
-            .parse_update_message(&update).await
+            .parse_update_message(&update)
             .expect("numeric allowlist should pass");
 
         assert_eq!(msg.sender, "555");
@@ -2958,7 +2958,7 @@ mod tests {
         });
 
         let msg = ch
-            .parse_update_message(&update).await
+            .parse_update_message(&update)
             .expect("message with thread_id should parse");
 
         assert_eq!(msg.sender, "alice");
@@ -3523,7 +3523,7 @@ mod tests {
     async fn parse_update_message_mention_only_group_requires_exact_mention() {
         let ch = TelegramChannel::new("token".into(), vec!["*".into()], true).await;
         {
-            let mut cache = ch.bot_username.lock().await;
+            let mut cache = ch.bot_username.lock().unwrap();
             *cache = Some("mybot".to_string());
         }
 
@@ -3543,14 +3543,14 @@ mod tests {
             }
         });
 
-        assert!(ch.parse_update_message(&update).await.is_none());
+        assert!(ch.parse_update_message(&update).is_none());
     }
 
     #[tokio::test]
     async fn parse_update_message_mention_only_group_strips_mention_and_drops_empty() {
         let ch = TelegramChannel::new("token".into(), vec!["*".into()], true).await;
         {
-            let mut cache = ch.bot_username.lock().await;
+            let mut cache = ch.bot_username.lock().unwrap();
             *cache = Some("mybot".to_string());
         }
 
@@ -3571,7 +3571,7 @@ mod tests {
         });
 
         let parsed = ch
-            .parse_update_message(&update).await
+            .parse_update_message(&update)
             .expect("mention should parse");
         assert_eq!(parsed.content, "Hi status please");
 
@@ -3591,7 +3591,7 @@ mod tests {
             }
         });
 
-        assert!(ch.parse_update_message(&empty_update).await.is_none());
+        assert!(ch.parse_update_message(&empty_update).is_none());
     }
 
     #[test]
@@ -3795,9 +3795,9 @@ mod tests {
     // extract_reply_context tests
     // ─────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn extract_reply_context_text_message() {
-        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false);
+    #[tokio::test]
+    async fn extract_reply_context_text_message() {
+        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false).await;
         let msg = serde_json::json!({
             "reply_to_message": {
                 "from": { "username": "alice" },
@@ -3808,9 +3808,9 @@ mod tests {
         assert_eq!(ctx, "> @alice:\n> Hello world");
     }
 
-    #[test]
-    fn extract_reply_context_voice_message() {
-        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false);
+    #[tokio::test]
+    async fn extract_reply_context_voice_message() {
+        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false).await;
         let msg = serde_json::json!({
             "reply_to_message": {
                 "from": { "username": "bob" },
@@ -3821,18 +3821,18 @@ mod tests {
         assert_eq!(ctx, "> @bob:\n> [Voice message]");
     }
 
-    #[test]
-    fn extract_reply_context_no_reply() {
-        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false);
+    #[tokio::test]
+    async fn extract_reply_context_no_reply() {
+        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false).await;
         let msg = serde_json::json!({
             "text": "just a regular message"
         });
         assert!(ch.extract_reply_context(&msg).is_none());
     }
 
-    #[test]
-    fn extract_reply_context_no_username_uses_first_name() {
-        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false);
+    #[tokio::test]
+    async fn extract_reply_context_no_username_uses_first_name() {
+        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false).await;
         let msg = serde_json::json!({
             "reply_to_message": {
                 "from": { "id": 999, "first_name": "Charlie" },
@@ -3843,12 +3843,12 @@ mod tests {
         assert_eq!(ctx, "> @Charlie:\n> Hi there");
     }
 
-    #[test]
-    fn extract_reply_context_voice_with_cached_transcription() {
-        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false);
+    #[tokio::test]
+    async fn extract_reply_context_voice_with_cached_transcription() {
+        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false).await;
         // Pre-populate transcription cache
         ch.voice_transcriptions
-            .lock()
+            .lock().unwrap()
             .insert("100:42".to_string(), "Hello from voice".to_string());
         let msg = serde_json::json!({
             "chat": { "id": 100 },
@@ -3862,9 +3862,9 @@ mod tests {
         assert_eq!(ctx, "> @bob:\n> [Voice] Hello from voice");
     }
 
-    #[test]
-    fn parse_update_message_includes_reply_context() {
-        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false);
+    #[tokio::test]
+    async fn parse_update_message_includes_reply_context() {
+        let ch = TelegramChannel::new("t".into(), vec!["*".into()], false).await;
         let update = serde_json::json!({
             "message": {
                 "message_id": 10,
@@ -3893,21 +3893,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn with_transcription_sets_config_when_enabled() {
+    #[tokio::test]
+    async fn with_transcription_sets_config_when_enabled() {
         let mut tc = crate::config::TranscriptionConfig::default();
         tc.enabled = true;
 
         let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false).with_transcription(tc);
+            TelegramChannel::new("token".into(), vec!["*".into()], false).await.with_transcription(tc);
         assert!(ch.transcription.is_some());
     }
 
-    #[test]
-    fn with_transcription_skips_when_disabled() {
+    #[tokio::test]
+    async fn with_transcription_skips_when_disabled() {
         let tc = crate::config::TranscriptionConfig::default(); // enabled = false
         let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false).with_transcription(tc);
+            TelegramChannel::new("token".into(), vec!["*".into()], false).await.with_transcription(tc);
         assert!(ch.transcription.is_none());
     }
 
@@ -3960,12 +3960,12 @@ mod tests {
         );
 
         // 4. Create TelegramChannel, insert transcription into voice_transcriptions cache
-        let ch = TelegramChannel::new("test_token".into(), vec!["*".into()], false);
+        let ch = TelegramChannel::new("test_token".into(), vec!["*".into()], false).await;
         let chat_id: i64 = 12345;
         let message_id: i64 = 67;
         let cache_key = format!("{chat_id}:{message_id}");
         ch.voice_transcriptions
-            .lock()
+            .lock().unwrap()
             .insert(cache_key, transcript.clone());
 
         // 5. Build reply message with voice + message_id + chat.id
@@ -4096,9 +4096,9 @@ mod tests {
         assert!(TelegramChannel::parse_attachment_metadata(&message).is_none());
     }
 
-    #[test]
-    fn with_workspace_dir_sets_field() {
-        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false)
+    #[tokio::test]
+    async fn with_workspace_dir_sets_field() {
+        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await
             .with_workspace_dir(std::path::PathBuf::from("/tmp/test_workspace"));
         assert_eq!(
             ch.workspace_dir.as_deref(),

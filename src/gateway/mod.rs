@@ -828,7 +828,7 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
 
 /// Full-featured chat with tools for channel handlers (WhatsApp, Linq, Nextcloud Talk).
 async fn run_gateway_chat_with_tools(state: &AppState, message: &str) -> anyhow::Result<String> {
-    let config = state.config.lock().clone();
+    let config = state.config.lock().await.clone();
     crate::agent::process_message(config, message).await
 }
 
@@ -2452,88 +2452,88 @@ mod tests {
     // IdempotencyStore Edge-Case Tests
     // ══════════════════════════════════════════════════════════
 
-    #[test]
-    fn idempotency_store_allows_different_keys() {
+    #[tokio::test]
+    async fn idempotency_store_allows_different_keys() {
         let store = IdempotencyStore::new(Duration::from_secs(60), 100);
-        assert!(store.record_if_new("key-a"));
-        assert!(store.record_if_new("key-b"));
-        assert!(store.record_if_new("key-c"));
-        assert!(store.record_if_new("key-d"));
+        assert!(store.record_if_new("key-a").await);
+        assert!(store.record_if_new("key-b").await);
+        assert!(store.record_if_new("key-c").await);
+        assert!(store.record_if_new("key-d").await);
     }
 
-    #[test]
-    fn idempotency_store_max_keys_clamped_to_one() {
+    #[tokio::test]
+    async fn idempotency_store_max_keys_clamped_to_one() {
         let store = IdempotencyStore::new(Duration::from_secs(60), 0);
-        assert!(store.record_if_new("only-key"));
-        assert!(!store.record_if_new("only-key"));
+        assert!(store.record_if_new("only-key").await);
+        assert!(!store.record_if_new("only-key").await);
     }
 
-    #[test]
-    fn idempotency_store_rapid_duplicate_rejected() {
+    #[tokio::test]
+    async fn idempotency_store_rapid_duplicate_rejected() {
         let store = IdempotencyStore::new(Duration::from_secs(300), 100);
-        assert!(store.record_if_new("rapid"));
-        assert!(!store.record_if_new("rapid"));
+        assert!(store.record_if_new("rapid").await);
+        assert!(!store.record_if_new("rapid").await);
     }
 
-    #[test]
-    fn idempotency_store_accepts_after_ttl_expires() {
+    #[tokio::test]
+    async fn idempotency_store_accepts_after_ttl_expires() {
         let store = IdempotencyStore::new(Duration::from_millis(1), 100);
-        assert!(store.record_if_new("ttl-key"));
-        std::thread::sleep(Duration::from_millis(10));
-        assert!(store.record_if_new("ttl-key"));
+        assert!(store.record_if_new("ttl-key").await);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(store.record_if_new("ttl-key").await);
     }
 
-    #[test]
-    fn idempotency_store_eviction_preserves_newest() {
+    #[tokio::test]
+    async fn idempotency_store_eviction_preserves_newest() {
         let store = IdempotencyStore::new(Duration::from_secs(300), 1);
-        assert!(store.record_if_new("old-key"));
-        std::thread::sleep(Duration::from_millis(2));
-        assert!(store.record_if_new("new-key"));
+        assert!(store.record_if_new("old-key").await);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert!(store.record_if_new("new-key").await);
 
-        let keys = store.keys.lock();
+        let keys = store.keys.lock().await;
         assert_eq!(keys.len(), 1);
         assert!(!keys.contains_key("old-key"));
         assert!(keys.contains_key("new-key"));
     }
 
-    #[test]
-    fn rate_limiter_allows_after_window_expires() {
+    #[tokio::test]
+    async fn rate_limiter_allows_after_window_expires() {
         let window = Duration::from_millis(50);
         let limiter = SlidingWindowRateLimiter::new(2, window, 100);
-        assert!(limiter.allow("ip-1"));
-        assert!(limiter.allow("ip-1"));
-        assert!(!limiter.allow("ip-1")); // blocked
+        assert!(limiter.allow("ip-1").await);
+        assert!(limiter.allow("ip-1").await);
+        assert!(!limiter.allow("ip-1").await); // blocked
 
         // Wait for window to expire
-        std::thread::sleep(Duration::from_millis(60));
+        tokio::time::sleep(Duration::from_millis(60)).await;
 
         // Should be allowed again
-        assert!(limiter.allow("ip-1"));
+        assert!(limiter.allow("ip-1").await);
     }
 
-    #[test]
-    fn rate_limiter_independent_keys_tracked_separately() {
+    #[tokio::test]
+    async fn rate_limiter_independent_keys_tracked_separately() {
         let limiter = SlidingWindowRateLimiter::new(2, Duration::from_secs(60), 100);
-        assert!(limiter.allow("ip-1"));
-        assert!(limiter.allow("ip-1"));
-        assert!(!limiter.allow("ip-1")); // ip-1 blocked
+        assert!(limiter.allow("ip-1").await);
+        assert!(limiter.allow("ip-1").await);
+        assert!(!limiter.allow("ip-1").await); // ip-1 blocked
 
         // ip-2 should still work
-        assert!(limiter.allow("ip-2"));
-        assert!(limiter.allow("ip-2"));
-        assert!(!limiter.allow("ip-2")); // ip-2 now blocked
+        assert!(limiter.allow("ip-2").await);
+        assert!(limiter.allow("ip-2").await);
+        assert!(!limiter.allow("ip-2").await); // ip-2 now blocked
     }
 
-    #[test]
-    fn rate_limiter_exact_boundary_at_max_keys() {
+    #[tokio::test]
+    async fn rate_limiter_exact_boundary_at_max_keys() {
         let limiter = SlidingWindowRateLimiter::new(10, Duration::from_secs(60), 3);
-        assert!(limiter.allow("ip-1"));
-        assert!(limiter.allow("ip-2"));
-        assert!(limiter.allow("ip-3"));
+        assert!(limiter.allow("ip-1").await);
+        assert!(limiter.allow("ip-2").await);
+        assert!(limiter.allow("ip-3").await);
         // At capacity now
-        assert!(limiter.allow("ip-4")); // should evict ip-1
+        assert!(limiter.allow("ip-4").await); // should evict ip-1
 
-        let guard = limiter.requests.lock();
+        let guard = limiter.requests.lock().await;
         assert_eq!(guard.0.len(), 3);
         assert!(
             !guard.0.contains_key("ip-1"),
@@ -2544,36 +2544,36 @@ mod tests {
         assert!(guard.0.contains_key("ip-4"));
     }
 
-    #[test]
-    fn gateway_rate_limiter_pair_and_webhook_are_independent() {
+    #[tokio::test]
+    async fn gateway_rate_limiter_pair_and_webhook_are_independent() {
         let limiter = GatewayRateLimiter::new(2, 3, 100);
 
         // Exhaust pair limit
-        assert!(limiter.allow_pair("ip-1"));
-        assert!(limiter.allow_pair("ip-1"));
-        assert!(!limiter.allow_pair("ip-1")); // pair blocked
+        assert!(limiter.allow_pair("ip-1").await);
+        assert!(limiter.allow_pair("ip-1").await);
+        assert!(!limiter.allow_pair("ip-1").await); // pair blocked
 
         // Webhook should still work
-        assert!(limiter.allow_webhook("ip-1"));
-        assert!(limiter.allow_webhook("ip-1"));
-        assert!(limiter.allow_webhook("ip-1"));
-        assert!(!limiter.allow_webhook("ip-1")); // webhook now blocked
+        assert!(limiter.allow_webhook("ip-1").await);
+        assert!(limiter.allow_webhook("ip-1").await);
+        assert!(limiter.allow_webhook("ip-1").await);
+        assert!(!limiter.allow_webhook("ip-1").await); // webhook now blocked
     }
 
-    #[test]
-    fn rate_limiter_single_key_max_allows_one_request() {
+    #[tokio::test]
+    async fn rate_limiter_single_key_max_allows_one_request() {
         let limiter = SlidingWindowRateLimiter::new(5, Duration::from_secs(60), 1);
-        assert!(limiter.allow("ip-1"));
-        assert!(limiter.allow("ip-2")); // evicts ip-1
+        assert!(limiter.allow("ip-1").await);
+        assert!(limiter.allow("ip-2").await); // evicts ip-1
 
-        let guard = limiter.requests.lock();
+        let guard = limiter.requests.lock().await;
         assert_eq!(guard.0.len(), 1);
         assert!(guard.0.contains_key("ip-2"));
         assert!(!guard.0.contains_key("ip-1"));
     }
 
-    #[test]
-    fn rate_limiter_concurrent_access_safe() {
+    #[tokio::test]
+    async fn rate_limiter_concurrent_access_safe() {
         use std::sync::Arc;
 
         let limiter = Arc::new(SlidingWindowRateLimiter::new(
@@ -2585,24 +2585,24 @@ mod tests {
 
         for i in 0..10 {
             let limiter = limiter.clone();
-            handles.push(std::thread::spawn(move || {
+            handles.push(tokio::spawn(async move {
                 for j in 0..100 {
-                    limiter.allow(&format!("thread-{i}-req-{j}"));
+                    limiter.allow(&format!("thread-{i}-req-{j}")).await;
                 }
             }));
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.await.unwrap();
         }
 
         // Should not panic or deadlock
-        let guard = limiter.requests.lock();
+        let guard = limiter.requests.lock().await;
         assert!(guard.0.len() <= 1000, "should respect max_keys");
     }
 
-    #[test]
-    fn idempotency_store_concurrent_access_safe() {
+    #[tokio::test]
+    async fn idempotency_store_concurrent_access_safe() {
         use std::sync::Arc;
 
         let store = Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000));
@@ -2610,35 +2610,35 @@ mod tests {
 
         for i in 0..10 {
             let store = store.clone();
-            handles.push(std::thread::spawn(move || {
+            handles.push(tokio::spawn(async move {
                 for j in 0..100 {
-                    store.record_if_new(&format!("thread-{i}-key-{j}"));
+                    store.record_if_new(&format!("thread-{i}-key-{j}")).await;
                 }
             }));
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.await.unwrap();
         }
 
-        let keys = store.keys.lock();
+        let keys = store.keys.lock().await;
         assert!(keys.len() <= 1000, "should respect max_keys");
     }
 
-    #[test]
-    fn rate_limiter_rapid_burst_then_cooldown() {
+    #[tokio::test]
+    async fn rate_limiter_rapid_burst_then_cooldown() {
         let limiter = SlidingWindowRateLimiter::new(5, Duration::from_millis(50), 100);
 
         // Burst: use all 5 requests
         for _ in 0..5 {
-            assert!(limiter.allow("burst-ip"));
+            assert!(limiter.allow("burst-ip").await);
         }
-        assert!(!limiter.allow("burst-ip")); // 6th should fail
+        assert!(!limiter.allow("burst-ip").await); // 6th should fail
 
         // Cooldown
-        std::thread::sleep(Duration::from_millis(60));
+        tokio::time::sleep(Duration::from_millis(60)).await;
 
         // Should be allowed again
-        assert!(limiter.allow("burst-ip"));
+        assert!(limiter.allow("burst-ip").await);
     }
 }

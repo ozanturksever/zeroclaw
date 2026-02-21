@@ -609,7 +609,7 @@ impl Agent {
             let messages = self.tool_dispatcher.to_provider_messages(&self.history);
             // Use streaming provider path if supported, otherwise non-streaming
             let (response_text, tool_calls_from_response) = if self.provider.supports_streaming() {
-                use futures::StreamExt;
+                use futures_util::StreamExt;
                 let msgs_clone: Vec<ChatMessage> = messages.clone();
                 let mut stream = self.provider.stream_chat_with_history(
                     &msgs_clone,
@@ -642,6 +642,7 @@ impl Agent {
                 let synth_response = crate::providers::ChatResponse {
                     text: Some(accumulated),
                     tool_calls: vec![],
+                    usage: None,
                 };
                 let (text, calls) = self.tool_dispatcher.parse_response(&synth_response);
                 (text, calls)

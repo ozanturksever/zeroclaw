@@ -49,7 +49,7 @@ impl Tool for GlobSearchTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' parameter"))?;
 
         // Rate limit check (fast path)
-        if self.security.is_rate_limited() {
+        if self.security.is_rate_limited().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -76,7 +76,7 @@ impl Tool for GlobSearchTool {
         }
 
         // Record action to consume rate limit budget
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

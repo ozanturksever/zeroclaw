@@ -1892,7 +1892,7 @@ struct ToolExecutionOutcome {
     duration: Duration,
 }
 
-fn should_execute_tools_in_parallel(
+async fn should_execute_tools_in_parallel(
     tool_calls: &[ParsedToolCall],
     approval: Option<&ApprovalManager>,
 ) -> bool {
@@ -1901,10 +1901,12 @@ fn should_execute_tools_in_parallel(
     }
 
     if let Some(mgr) = approval {
-        if tool_calls.iter().any(|call| mgr.needs_approval(&call.name)) {
-            // Approval-gated calls must keep sequential handling so the caller can
-            // enforce CLI prompt/deny policy consistently.
-            return false;
+        for call in tool_calls.iter() {
+            if mgr.needs_approval(&call.name).await {
+                // Approval-gated calls must keep sequential handling so the caller can
+                // enforce CLI prompt/deny policy consistently.
+                return false;
+            }
         }
     }
 
@@ -2294,7 +2296,7 @@ pub(crate) async fn run_tool_call_loop(
         let mut individual_results: Vec<(Option<String>, String)> = Vec::new();
         let mut ordered_results: Vec<Option<(String, Option<String>, ToolExecutionOutcome)>> =
             (0..tool_calls.len()).map(|_| None).collect();
-        let allow_parallel_execution = should_execute_tools_in_parallel(&tool_calls, approval);
+        let allow_parallel_execution = should_execute_tools_in_parallel(&tool_calls, approval).await;
         let mut executable_indices: Vec<usize> = Vec::new();
         let mut executable_calls: Vec<ParsedToolCall> = Vec::new();
 
@@ -3688,19 +3690,19 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    #[test]
-    fn should_execute_tools_in_parallel_returns_false_for_single_call() {
+    #[tokio::test]
+    async fn should_execute_tools_in_parallel_returns_false_for_single_call() {
         let calls = vec![ParsedToolCall {
             name: "file_read".to_string(),
             arguments: serde_json::json!({"path": "a.txt"}),
             tool_call_id: None,
         }];
 
-        assert!(!should_execute_tools_in_parallel(&calls, None));
+        assert!(!should_execute_tools_in_parallel(&calls, None).await);
     }
 
-    #[test]
-    fn should_execute_tools_in_parallel_returns_false_when_approval_is_required() {
+    #[tokio::test]
+    async fn should_execute_tools_in_parallel_returns_false_when_approval_is_required() {
         let calls = vec![
             ParsedToolCall {
                 name: "shell".to_string(),
@@ -3719,11 +3721,11 @@ mod tests {
         assert!(!should_execute_tools_in_parallel(
             &calls,
             Some(&approval_mgr)
-        ));
+        ).await);
     }
 
-    #[test]
-    fn should_execute_tools_in_parallel_returns_true_when_cli_has_no_interactive_approvals() {
+    #[tokio::test]
+    async fn should_execute_tools_in_parallel_returns_true_when_cli_has_no_interactive_approvals() {
         let calls = vec![
             ParsedToolCall {
                 name: "shell".to_string(),
@@ -3745,7 +3747,7 @@ mod tests {
         assert!(should_execute_tools_in_parallel(
             &calls,
             Some(&approval_mgr)
-        ));
+        ).await);
     }
 
     #[tokio::test]

@@ -75,7 +75,7 @@ impl Tool for PdfReadTool {
             })
             .unwrap_or(DEFAULT_MAX_CHARS);
 
-        if self.security.is_rate_limited() {
+        if self.security.is_rate_limited().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -92,7 +92,7 @@ impl Tool for PdfReadTool {
         }
 
         // Record action before canonicalization so path-probing still consumes budget.
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

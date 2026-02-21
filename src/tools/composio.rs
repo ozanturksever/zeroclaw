@@ -11,7 +11,7 @@ use crate::security::policy::ToolOperation;
 use crate::security::SecurityPolicy;
 use anyhow::Context;
 use async_trait::async_trait;
-use parking_lot::RwLock;
+use std::sync::RwLock;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -170,13 +170,13 @@ impl ComposioTool {
     fn cache_connected_account(&self, app_name: &str, entity_id: &str, connected_account_id: &str) {
         let key = connected_account_cache_key(app_name, entity_id);
         self.recent_connected_accounts
-            .write()
+            .write().unwrap()
             .insert(key, connected_account_id.to_string());
     }
 
     fn get_cached_connected_account(&self, app_name: &str, entity_id: &str) -> Option<String> {
         let key = connected_account_cache_key(app_name, entity_id);
-        self.recent_connected_accounts.read().get(&key).cloned()
+        self.recent_connected_accounts.read().unwrap().get(&key).cloned()
     }
 
     async fn resolve_connected_account_ref(

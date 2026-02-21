@@ -1,7 +1,7 @@
 use crate::config::OtpConfig;
 use crate::security::secrets::SecretStore;
 use anyhow::{Context, Result};
-use parking_lot::Mutex;
+use std::sync::Mutex;
 use ring::hmac;
 use std::collections::HashMap;
 use std::fs;
@@ -70,7 +70,7 @@ impl OtpValidator {
         }
 
         {
-            let mut cache = self.cached_codes.lock();
+            let mut cache = self.cached_codes.lock().unwrap();
             cache.retain(|_, expiry| *expiry >= now_secs);
             if cache
                 .get(normalized)
@@ -94,7 +94,7 @@ impl OtpValidator {
             .any(|candidate| candidate == normalized);
 
         if is_valid {
-            let mut cache = self.cached_codes.lock();
+            let mut cache = self.cached_codes.lock().unwrap();
             cache.insert(
                 normalized.to_string(),
                 now_secs.saturating_add(self.config.cache_valid_secs),

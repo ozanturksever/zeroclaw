@@ -2646,7 +2646,7 @@ struct ConfiguredChannel {
     channel: Arc<dyn Channel>,
 }
 
-fn collect_configured_channels(
+async fn collect_configured_channels(
     config: &Config,
     _matrix_skip_context: &str,
 ) -> Vec<ConfiguredChannel> {
@@ -2899,7 +2899,7 @@ fn collect_configured_channels(
 
 /// Run health checks for configured channels.
 pub async fn doctor_channels(config: Config) -> Result<()> {
-    let mut channels = collect_configured_channels(&config, "health check");
+    let mut channels = collect_configured_channels(&config, "health check").await;
 
     if let Some(ref ns) = config.channels_config.nostr {
         channels.push(ConfiguredChannel {
@@ -3135,6 +3135,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     // Collect active channels from a shared builder to keep startup and doctor parity.
     let mut channels: Vec<Arc<dyn Channel>> =
         collect_configured_channels(&config, "runtime startup")
+            .await
             .into_iter()
             .map(|configured| configured.channel)
             .collect();
@@ -6145,8 +6146,8 @@ This is an example JSON object for profile settings."#;
         assert_eq!(state, ChannelHealthState::Timeout);
     }
 
-    #[test]
-    fn collect_configured_channels_includes_mattermost_when_configured() {
+    #[tokio::test]
+    async fn collect_configured_channels_includes_mattermost_when_configured() {
         let mut config = Config::default();
         config.channels_config.mattermost = Some(crate::config::schema::MattermostConfig {
             url: "https://mattermost.example.com".to_string(),
@@ -6157,7 +6158,7 @@ This is an example JSON object for profile settings."#;
             mention_only: Some(false),
         });
 
-        let channels = collect_configured_channels(&config, "test");
+        let channels = collect_configured_channels(&config, "test").await;
 
         assert!(channels
             .iter()
@@ -6263,7 +6264,7 @@ This is an example JSON object for profile settings."#;
         );
 
         tokio::time::sleep(Duration::from_millis(35)).await;
-        let first_last_ok = crate::health::snapshot_json()["components"][&component_name]
+        let first_last_ok = crate::health::snapshot_json().await["components"][&component_name]
             ["last_ok"]
             .as_str()
             .unwrap_or("")
@@ -6271,7 +6272,7 @@ This is an example JSON object for profile settings."#;
         assert!(!first_last_ok.is_empty());
 
         tokio::time::sleep(Duration::from_millis(70)).await;
-        let second_last_ok = crate::health::snapshot_json()["components"][&component_name]
+        let second_last_ok = crate::health::snapshot_json().await["components"][&component_name]
             ["last_ok"]
             .as_str()
             .unwrap_or("")

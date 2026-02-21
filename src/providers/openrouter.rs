@@ -3,7 +3,7 @@ use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
     Provider, ProviderCapabilities, StreamChunk, StreamError, StreamOptions, StreamResult, TokenUsage, ToolCall as ProviderToolCall,
 };
-use futures::stream::{self, StreamExt};
+use futures_util::stream::{self, StreamExt};
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -577,7 +577,7 @@ impl Provider for OpenRouterProvider {
         model: &str,
         temperature: f64,
         _options: StreamOptions,
-    ) -> futures::stream::BoxStream<'static, StreamResult<StreamChunk>> {
+    ) -> futures_util::stream::BoxStream<'static, StreamResult<StreamChunk>> {
         let credential = match self.credential.as_ref() {
             Some(value) => value.clone(),
             None => {
@@ -592,7 +592,7 @@ impl Provider for OpenRouterProvider {
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),
-                content: m.content.clone(),
+                content: MessageContent::Text(m.content.clone()),
             })
             .collect();
 

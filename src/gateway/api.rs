@@ -21,7 +21,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Verify bearer token against PairingGuard. Returns error response if unauthorized.
-fn require_auth(
+async fn require_auth(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -30,7 +30,7 @@ fn require_auth(
     }
 
     let token = extract_bearer_token(headers).unwrap_or("");
-    if state.pairing.is_authenticated(token) {
+    if state.pairing.is_authenticated(token).await {
         Ok(())
     } else {
         Err((
@@ -71,12 +71,12 @@ pub async fn handle_api_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
-    let health = crate::health::snapshot();
+    let config = state.config.lock().await.clone();
+    let health = crate::health::snapshot().await;
 
     let mut channels = serde_json::Map::new();
 
@@ -92,7 +92,7 @@ pub async fn handle_api_status(
         "gateway_port": config.gateway.port,
         "locale": "en",
         "memory_backend": state.mem.name(),
-        "paired": state.pairing.is_paired(),
+        "paired": state.pairing.is_paired().await,
         "channels": channels,
         "health": health,
     });
@@ -105,11 +105,11 @@ pub async fn handle_api_config_get(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.config.lock().await.clone();
 
     // Serialize to TOML, then mask sensitive fields
     let toml_str = match toml::to_string_pretty(&config) {
@@ -139,7 +139,7 @@ pub async fn handle_api_config_put(
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
@@ -165,7 +165,7 @@ pub async fn handle_api_config_put(
     }
 
     // Update in-memory config
-    *state.config.lock() = new_config;
+    *state.config.lock().await = new_config;
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
@@ -175,7 +175,7 @@ pub async fn handle_api_tools(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
@@ -199,11 +199,11 @@ pub async fn handle_api_cron_list(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.config.lock().await.clone();
     match crate::cron::list_jobs(&config) {
         Ok(jobs) => {
             let jobs_json: Vec<serde_json::Value> = jobs
@@ -236,11 +236,11 @@ pub async fn handle_api_cron_add(
     headers: HeaderMap,
     Json(body): Json<CronAddBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.config.lock().await.clone();
     let schedule = crate::cron::Schedule::Cron {
         expr: body.schedule,
         tz: None,
@@ -271,11 +271,11 @@ pub async fn handle_api_cron_delete(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.config.lock().await.clone();
     match crate::cron::remove_job(&config, &id) {
         Ok(()) => Json(serde_json::json!({"status": "ok"})).into_response(),
         Err(e) => (
@@ -291,11 +291,11 @@ pub async fn handle_api_integrations(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.config.lock().await.clone();
     let entries = crate::integrations::registry::all_integrations();
 
     let integrations: Vec<serde_json::Value> = entries
@@ -319,11 +319,11 @@ pub async fn handle_api_doctor(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.config.lock().await.clone();
     let results = crate::doctor::diagnose(&config);
 
     let ok_count = results
@@ -356,7 +356,7 @@ pub async fn handle_api_memory_list(
     headers: HeaderMap,
     Query(params): Query<MemoryQuery>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
@@ -396,7 +396,7 @@ pub async fn handle_api_memory_store(
     headers: HeaderMap,
     Json(body): Json<MemoryStoreBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
@@ -431,7 +431,7 @@ pub async fn handle_api_memory_delete(
     headers: HeaderMap,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
@@ -452,12 +452,12 @@ pub async fn handle_api_cost(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
     if let Some(ref tracker) = state.cost_tracker {
-        match tracker.get_summary() {
+        match tracker.get_summary().await {
             Ok(summary) => Json(serde_json::json!({"cost": summary})).into_response(),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -485,7 +485,7 @@ pub async fn handle_api_cli_tools(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
@@ -499,11 +499,11 @@ pub async fn handle_api_health(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
+    if let Err(e) = require_auth(&state, &headers).await {
         return e.into_response();
     }
 
-    let snapshot = crate::health::snapshot();
+    let snapshot = crate::health::snapshot().await;
     Json(serde_json::json!({"health": snapshot})).into_response()
 }
 

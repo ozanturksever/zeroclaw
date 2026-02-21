@@ -34,7 +34,7 @@ pub async fn handle_ws_chat(
     // Auth via query param (browser WebSocket limitation)
     if state.pairing.require_pairing() {
         let token = params.token.as_deref().unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
+        if !state.pairing.is_authenticated(token).await {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
                 "Unauthorized — provide ?token=<bearer_token>",
@@ -81,7 +81,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         // Process message with the LLM provider
         let provider_label = state
             .config
-            .lock()
+            .lock().await
             .default_provider
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
@@ -95,7 +95,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
         // Simple single-turn chat (no streaming for now — use provider.chat_with_system)
         let system_prompt = {
-            let config_guard = state.config.lock();
+            let config_guard = state.config.lock().await;
             crate::channels::build_system_prompt(
                 &config_guard.workspace_dir,
                 &state.model,
@@ -111,7 +111,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             crate::providers::ChatMessage::user(&content),
         ];
 
-        let multimodal_config = state.config.lock().multimodal.clone();
+        let multimodal_config = state.config.lock().await.multimodal.clone();
         let prepared =
             match crate::multimodal::prepare_messages_for_provider(&messages, &multimodal_config)
                 .await

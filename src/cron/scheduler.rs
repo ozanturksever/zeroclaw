@@ -33,7 +33,7 @@ pub async fn run(config: Config) -> Result<()> {
     loop {
         interval.tick().await;
         // Keep scheduler liveness fresh even when there are no due jobs.
-        crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+        crate::health::mark_component_ok(SCHEDULER_COMPONENT).await;
 
         let jobs = match due_jobs(&config, Utc::now()) {
             Ok(jobs) => jobs,
@@ -95,7 +95,7 @@ async fn process_due_jobs(
     component: &str,
 ) {
     // Refresh scheduler health on every successful poll cycle, including idle cycles.
-    crate::health::mark_component_ok(component);
+    crate::health::mark_component_ok(component).await;
 
     let max_concurrent = config.scheduler.max_concurrent.max(1);
     let mut in_flight =
@@ -147,14 +147,14 @@ async fn run_agent_job(
         );
     }
 
-    if security.is_rate_limited() {
+    if security.is_rate_limited().await {
         return (
             false,
             "blocked by security policy: rate limit exceeded".to_string(),
         );
     }
 
-    if !security.record_action() {
+    if !security.record_action().await {
         return (
             false,
             "blocked by security policy: action budget exhausted".to_string(),
@@ -755,7 +755,7 @@ mod tests {
         crate::health::mark_component_error(&component, "pre-existing error");
         process_due_jobs(&config, &security, Vec::new(), &component).await;
 
-        let snapshot = crate::health::snapshot_json();
+        let snapshot = crate::health::snapshot_json().await;
         let entry = &snapshot["components"][component.as_str()];
         assert_eq!(entry["status"], "ok");
         assert!(entry["last_ok"].as_str().is_some());
@@ -776,7 +776,7 @@ mod tests {
         crate::health::mark_component_ok(&component);
         process_due_jobs(&config, &security, vec![job], &component).await;
 
-        let snapshot = crate::health::snapshot_json();
+        let snapshot = crate::health::snapshot_json().await;
         let entry = &snapshot["components"][component.as_str()];
         assert_eq!(entry["status"], "ok");
     }

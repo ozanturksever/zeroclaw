@@ -1669,7 +1669,7 @@ impl Provider for OpenAiCompatibleProvider {
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),
-                content: m.content.clone(),
+                content: MessageContent::Text(m.content.clone()),
             })
             .collect();
 

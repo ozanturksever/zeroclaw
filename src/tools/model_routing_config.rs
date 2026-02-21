@@ -40,7 +40,7 @@ impl ModelRoutingConfigTool {
         Ok(parsed)
     }
 
-    fn require_write_access(&self) -> Option<ToolResult> {
+    async fn require_write_access(&self) -> Option<ToolResult> {
         if !self.security.can_act() {
             return Some(ToolResult {
                 success: false,
@@ -49,7 +49,7 @@ impl ModelRoutingConfigTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -868,7 +868,7 @@ impl Tool for ModelRoutingConfigTool {
             | "remove_scenario"
             | "upsert_agent"
             | "remove_agent" => {
-                if let Some(blocked) = self.require_write_access() {
+                if let Some(blocked) = self.require_write_access().await {
                     return Ok(blocked);
                 }
 

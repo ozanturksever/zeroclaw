@@ -162,7 +162,7 @@ impl Tool for ContentSearchTool {
             .min(MAX_RESULTS);
 
         // --- Rate limit check ---
-        if self.security.is_rate_limited() {
+        if self.security.is_rate_limited().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -198,7 +198,7 @@ impl Tool for ContentSearchTool {
         }
 
         // Record action to consume rate limit budget
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

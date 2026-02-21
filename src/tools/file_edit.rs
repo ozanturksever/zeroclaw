@@ -86,7 +86,7 @@ impl Tool for FileEditTool {
         }
 
         // ── 3. Rate limit check ────────────────────────────────────
-        if self.security.is_rate_limited() {
+        if self.security.is_rate_limited().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -162,7 +162,7 @@ impl Tool for FileEditTool {
         }
 
         // ── 8. Record action ───────────────────────────────────────
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

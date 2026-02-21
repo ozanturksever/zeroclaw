@@ -1883,7 +1883,7 @@ mod tests {
     /// implementing `chat()` for native tool calling parity tests.
     struct NativeModelAwareMock {
         calls: Arc<AtomicUsize>,
-        models_seen: parking_lot::Mutex<Vec<String>>,
+        models_seen: std::sync::Mutex<Vec<String>>,
         fail_models: Vec<&'static str>,
         response_text: &'static str,
     }
@@ -1911,7 +1911,7 @@ mod tests {
             _temperature: f64,
         ) -> anyhow::Result<ChatResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.models_seen.lock().push(model.to_string());
+            self.models_seen.lock().unwrap().push(model.to_string());
             if self.fail_models.contains(&model) {
                 anyhow::bail!("500 model {} unavailable", model);
             }
@@ -1958,7 +1958,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mock = Arc::new(NativeModelAwareMock {
             calls: Arc::clone(&calls),
-            models_seen: parking_lot::Mutex::new(Vec::new()),
+            models_seen: std::sync::Mutex::new(Vec::new()),
             fail_models: vec!["claude-opus"],
             response_text: "ok from sonnet",
         });
@@ -1984,7 +1984,7 @@ mod tests {
         let result = provider.chat(request, "claude-opus", 0.0).await.unwrap();
         assert_eq!(result.text.as_deref(), Some("ok from sonnet"));
 
-        let seen = mock.models_seen.lock();
+        let seen = mock.models_seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0], "claude-opus");
         assert_eq!(seen[1], "claude-sonnet");

@@ -16,7 +16,7 @@ impl CronAddTool {
         Self { config, security }
     }
 
-    fn enforce_mutation_allowed(&self, action: &str) -> Option<ToolResult> {
+    async fn enforce_mutation_allowed(&self, action: &str) -> Option<ToolResult> {
         if !self.security.can_act() {
             return Some(ToolResult {
                 success: false,
@@ -27,7 +27,7 @@ impl CronAddTool {
             });
         }
 
-        if self.security.is_rate_limited() {
+        if self.security.is_rate_limited().await {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -35,7 +35,7 @@ impl CronAddTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -167,7 +167,7 @@ impl Tool for CronAddTool {
                     });
                 }
 
-                if let Some(blocked) = self.enforce_mutation_allowed("cron_add") {
+                if let Some(blocked) = self.enforce_mutation_allowed("cron_add").await {
                     return Ok(blocked);
                 }
 
@@ -218,7 +218,7 @@ impl Tool for CronAddTool {
                     None => None,
                 };
 
-                if let Some(blocked) = self.enforce_mutation_allowed("cron_add") {
+                if let Some(blocked) = self.enforce_mutation_allowed("cron_add").await {
                     return Ok(blocked);
                 }
 

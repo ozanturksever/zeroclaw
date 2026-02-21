@@ -75,7 +75,7 @@ impl Tool for CronRunTool {
             });
         }
 
-        if self.security.is_rate_limited() {
+        if self.security.is_rate_limited().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -107,7 +107,7 @@ impl Tool for CronRunTool {
             }
         }
 
-        if !self.security.record_action() {
+        if !self.security.record_action().await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
