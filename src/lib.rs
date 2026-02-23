@@ -45,7 +45,7 @@ pub mod channels;
 pub mod config;
 pub(crate) mod cost;
 pub(crate) mod cron;
-pub(crate) mod daemon;
+pub mod daemon;
 #[cfg(feature = "dink")]
 pub mod dink;
 pub(crate) mod doctor;

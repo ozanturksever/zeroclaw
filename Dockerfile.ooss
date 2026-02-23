@@ -1,7 +1,7 @@
 # ZeroClaw OOSS Docker Image
 # Minimal image with Dink integration for edge mesh connectivity.
 #
-# Build: docker build -f Dockerfile.ooss -t zeroclaw-ooss:latest .
+# Build: docker build -f Dockerfile.ooss -t logsign/zeroclaw:latest .
 # Size target: <15MB (binary ~3-5MB + alpine base + certs)
 
 FROM rust:1-alpine AS builder
@@ -13,21 +13,22 @@ WORKDIR /build
 # Cache dependencies first
 COPY Cargo.toml Cargo.lock* ./
 COPY crates/ crates/
-RUN mkdir src && echo 'fn main(){}' > src/main.rs && \
-    cargo build --release --features dink 2>/dev/null || true && \
+RUN mkdir -p src src/bin && echo 'fn main(){}' > src/main.rs && \
+    echo 'fn main(){}' > src/bin/ooss-daemon.rs && \
+    cargo build --release --features dink --bin ooss-daemon 2>/dev/null || true && \
     rm -rf src/
 
-# Build actual binary
+# Build actual binary (only the OOSS daemon — avoids upstream main.rs breakage)
 COPY . .
-RUN cargo build --release --features dink && \
-    strip target/release/zeroclaw
+RUN cargo build --release --features dink --bin ooss-daemon && \
+    strip target/release/ooss-daemon
 
 # --- Final image ---
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tini
 
-COPY --from=builder /build/target/release/zeroclaw /usr/local/bin/zeroclaw
+COPY --from=builder /build/target/release/ooss-daemon /usr/local/bin/zeroclaw
 
 # Create workspace directory
 RUN mkdir -p /workspace /config
@@ -38,5 +39,8 @@ VOLUME ["/workspace", "/config"]
 ENV ZEROCLAW_HOME=/config
 ENV ZEROCLAW_WORKSPACE=/workspace
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD wget -qO- http://localhost:9468/v1/health || exit 1
+
 ENTRYPOINT ["tini", "--"]
-CMD ["zeroclaw", "daemon"]
+CMD ["zeroclaw"]
