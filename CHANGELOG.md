@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-23 (fork)
+
+### Fork Changes
+
+- 458526c docs: update FORKSTATE-GUIDE baseline to 359cfb4 post-merge
+- 72b2cf3 merge(upstream): sync upstream/dev into fork
+- ae66a8d docs: add forkstate guide documenting merge policies and changes
+- 4633217 build(ooss): add ooss-daemon binary, HEALTHCHECK, dink-sdk 0.3.1
+- debf044 deps: switch dink-sdk from path to crates.io v0.3.1
+
+### Docs / CI Changes
+
+- 72b2cf3 merge(upstream): sync upstream/dev into fork
+
+### Upstream Baseline
+
+- upstream/main: c47fb22
+
+
 ## [0.2.0] - 2026-02-23 (fork)
 
 ### Fork Changes
