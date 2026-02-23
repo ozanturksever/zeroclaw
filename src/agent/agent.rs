@@ -11,6 +11,7 @@ use crate::runtime;
 use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool, ToolSpec};
 use anyhow::Result;
+use std::collections::HashMap;
 use std::io::Write as IoWrite;
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,6 +36,7 @@ pub struct Agent {
     history: Vec<ConversationMessage>,
     classification_config: crate::config::QueryClassificationConfig,
     available_hints: Vec<String>,
+    route_model_by_hint: HashMap<String, String>,
 }
 
 /// Runtime configuration changes that can be applied without restart.
@@ -64,6 +66,7 @@ pub struct AgentBuilder {
     auto_save: Option<bool>,
     classification_config: Option<crate::config::QueryClassificationConfig>,
     available_hints: Option<Vec<String>>,
+    route_model_by_hint: Option<HashMap<String, String>>,
 }
 
 impl AgentBuilder {
@@ -86,6 +89,7 @@ impl AgentBuilder {
             auto_save: None,
             classification_config: None,
             available_hints: None,
+            route_model_by_hint: None,
         }
     }
 
@@ -180,6 +184,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn route_model_by_hint(mut self, route_model_by_hint: HashMap<String, String>) -> Self {
+        self.route_model_by_hint = Some(route_model_by_hint);
+        self
+    }
+
     pub fn build(self) -> Result<Agent> {
         let tools = self
             .tools
@@ -222,6 +231,7 @@ impl AgentBuilder {
             history: Vec::new(),
             classification_config: self.classification_config.unwrap_or_default(),
             available_hints: self.available_hints.unwrap_or_default(),
+            route_model_by_hint: self.route_model_by_hint.unwrap_or_default(),
         })
     }
 }
@@ -332,8 +342,12 @@ impl Agent {
             _ => Box::new(XmlToolDispatcher),
         };
 
-        let available_hints: Vec<String> =
-            config.model_routes.iter().map(|r| r.hint.clone()).collect();
+        let route_model_by_hint: HashMap<String, String> = config
+            .model_routes
+            .iter()
+            .map(|route| (route.hint.clone(), route.model.clone()))
+            .collect();
+        let available_hints: Vec<String> = route_model_by_hint.keys().cloned().collect();
 
         Agent::builder()
             .provider(provider)
@@ -352,6 +366,7 @@ impl Agent {
             .workspace_dir(config.workspace_dir.clone())
             .classification_config(config.query_classification.clone())
             .available_hints(available_hints)
+            .route_model_by_hint(route_model_by_hint)
             .identity_config(config.identity.clone())
             .skills(crate::skills::load_skills_with_config(
                 &config.workspace_dir,
@@ -458,10 +473,24 @@ impl Agent {
     }
 
     fn classify_model(&self, user_message: &str) -> String {
-        if let Some(hint) = super::classifier::classify(&self.classification_config, user_message) {
-            if self.available_hints.contains(&hint) {
-                tracing::info!(hint = hint.as_str(), "Auto-classified query");
-                return format!("hint:{hint}");
+        if let Some(decision) =
+            super::classifier::classify_with_decision(&self.classification_config, user_message)
+        {
+            if self.available_hints.contains(&decision.hint) {
+                let resolved_model = self
+                    .route_model_by_hint
+                    .get(&decision.hint)
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                tracing::info!(
+                    target: "query_classification",
+                    hint = decision.hint.as_str(),
+                    model = resolved_model,
+                    rule_priority = decision.priority,
+                    message_length = user_message.len(),
+                    "Classified message route"
+                );
+                return format!("hint:{}", decision.hint);
             }
         }
         self.model_name.clone()
@@ -489,10 +518,11 @@ impl Agent {
             .await
             .unwrap_or_default();
 
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
-            user_message.to_string()
+            format!("[{now}] {user_message}")
         } else {
-            format!("{context}{user_message}")
+            format!("{context}[{now}] {user_message}")
         };
 
         self.history
@@ -551,6 +581,7 @@ impl Agent {
             self.history.push(ConversationMessage::AssistantToolCalls {
                 text: response.text.clone(),
                 tool_calls: response.tool_calls.clone(),
+                reasoning_content: response.reasoning_content.clone(),
             });
 
             let results = self.execute_tools(&calls).await;
@@ -646,6 +677,7 @@ impl Agent {
                     text: Some(accumulated),
                     tool_calls: vec![],
                     usage: None,
+                    reasoning_content: None,
                 };
                 let (text, calls) = self.tool_dispatcher.parse_response(&synth_response);
                 (text, calls)
@@ -708,6 +740,7 @@ impl Agent {
             self.history.push(ConversationMessage::AssistantToolCalls {
                 text: Some(response_text),
                 tool_calls: vec![],
+                reasoning_content: None,
             });
 
             for call in &tool_calls_from_response {
@@ -827,6 +860,7 @@ pub async fn run(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::collections::HashMap;
     use tokio::sync::Mutex;
 
     struct MockProvider {
@@ -857,6 +891,44 @@ mod tests {
                     text: Some("done".into()),
                     tool_calls: vec![],
                     usage: None,
+                    reasoning_content: None,
+                });
+            }
+            Ok(guard.remove(0))
+        }
+    }
+
+    struct ModelCaptureProvider {
+        responses: Mutex<Vec<crate::providers::ChatResponse>>,
+        seen_models: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ModelCaptureProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> Result<String> {
+            Ok("ok".into())
+        }
+
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            model: &str,
+            _temperature: f64,
+        ) -> Result<crate::providers::ChatResponse> {
+            self.seen_models.lock().await.push(model.to_string());
+            let mut guard = self.responses.lock().await;
+            if guard.is_empty() {
+                return Ok(crate::providers::ChatResponse {
+                    text: Some("done".into()),
+                    tool_calls: vec![],
+                    usage: None,
+                    reasoning_content: None,
                 });
             }
             Ok(guard.remove(0))
@@ -895,6 +967,7 @@ mod tests {
                 text: Some("hello".into()),
                 tool_calls: vec![],
                 usage: None,
+                reasoning_content: None,
             }]),
         });
 
@@ -934,11 +1007,13 @@ mod tests {
                         arguments: "{}".into(),
                     }],
                     usage: None,
+                    reasoning_content: None,
                 },
                 crate::providers::ChatResponse {
                     text: Some("done".into()),
                     tool_calls: vec![],
                     usage: None,
+                    reasoning_content: None,
                 },
             ]),
         });
@@ -969,5 +1044,59 @@ mod tests {
             .history()
             .iter()
             .any(|msg| matches!(msg, ConversationMessage::ToolResults(_))));
+    }
+
+    #[tokio::test]
+    async fn turn_routes_with_hint_when_query_classification_matches() {
+        let seen_models = Arc::new(Mutex::new(Vec::new()));
+        let provider = Box::new(ModelCaptureProvider {
+            responses: Mutex::new(vec![crate::providers::ChatResponse {
+                text: Some("classified".into()),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            }]),
+            seen_models: seen_models.clone(),
+        });
+
+        let memory_cfg = crate::config::MemoryConfig {
+            backend: "none".into(),
+            ..crate::config::MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> = Arc::from(
+            crate::memory::create_memory(&memory_cfg, std::path::Path::new("/tmp"), None)
+                .expect("memory creation should succeed with valid config"),
+        );
+
+        let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
+        let mut route_model_by_hint = HashMap::new();
+        route_model_by_hint.insert("fast".to_string(), "anthropic/claude-haiku-4-5".to_string());
+        let mut agent = Agent::builder()
+            .provider(provider)
+            .tools(vec![Box::new(MockTool)])
+            .memory(mem)
+            .observer(observer)
+            .tool_dispatcher(Box::new(NativeToolDispatcher))
+            .workspace_dir(std::path::PathBuf::from("/tmp"))
+            .classification_config(crate::config::QueryClassificationConfig {
+                enabled: true,
+                rules: vec![crate::config::ClassificationRule {
+                    hint: "fast".to_string(),
+                    keywords: vec!["quick".to_string()],
+                    patterns: vec![],
+                    min_length: None,
+                    max_length: None,
+                    priority: 10,
+                }],
+            })
+            .available_hints(vec!["fast".to_string()])
+            .route_model_by_hint(route_model_by_hint)
+            .build()
+            .expect("agent builder should succeed with valid config");
+
+        let response = agent.turn("quick summary please").await.unwrap();
+        assert_eq!(response, "classified");
+        let seen = seen_models.lock().await;
+        assert_eq!(seen.as_slice(), &["hint:fast".to_string()]);
     }
 }

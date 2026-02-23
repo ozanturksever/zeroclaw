@@ -14,8 +14,9 @@ use zeroclaw::channels::telegram::TelegramChannel;
 use zeroclaw::channels::traits::{Channel, SendMessage};
 
 /// Helper: create a TelegramChannel pointing at a mock server.
-fn test_channel(mock_url: &str) -> TelegramChannel {
+async fn test_channel(mock_url: &str) -> TelegramChannel {
     TelegramChannel::new("TEST_TOKEN".into(), vec!["*".into()], false)
+        .await
         .with_api_base(mock_url.to_string())
 }
 
@@ -57,7 +58,7 @@ async fn document_url_failure_falls_back_to_text_link() {
     // sendMessage should succeed (this is the fallback)
     mock_send_message_ok(&server).await;
 
-    let channel = test_channel(&server.uri());
+    let channel = test_channel(&server.uri()).await;
     let msg = SendMessage::new(
         "Here is the report [DOCUMENT:https://example.com/page.html]",
         "123",
@@ -89,7 +90,7 @@ async fn photo_url_failure_falls_back_to_text_link() {
 
     mock_send_message_ok(&server).await;
 
-    let channel = test_channel(&server.uri());
+    let channel = test_channel(&server.uri()).await;
     let msg = SendMessage::new(
         "Check this [IMAGE:https://internal-server.local/screenshot.png]",
         "456",
@@ -137,7 +138,7 @@ async fn text_portion_delivered_before_attachment_failure() {
         .mount(&server)
         .await;
 
-    let channel = test_channel(&server.uri());
+    let channel = test_channel(&server.uri()).await;
     let msg = SendMessage::new(
         "Here is the file [DOCUMENT:https://example.com/report.html]",
         "789",
@@ -192,7 +193,7 @@ async fn multiple_attachments_independent_fallback() {
         .mount(&server)
         .await;
 
-    let channel = test_channel(&server.uri());
+    let channel = test_channel(&server.uri()).await;
     let msg = SendMessage::new(
         "Files: [DOCUMENT:https://example.com/page.html] and [IMAGE:https://internal.local/pic.png]",
         "100",
@@ -241,7 +242,7 @@ async fn successful_attachment_no_fallback() {
         .mount(&server)
         .await;
 
-    let channel = test_channel(&server.uri());
+    let channel = test_channel(&server.uri()).await;
     let msg = SendMessage::new(
         "Report attached [DOCUMENT:https://example.com/report.pdf]",
         "200",
@@ -286,7 +287,7 @@ async fn document_only_message_falls_back_to_text() {
         .mount(&server)
         .await;
 
-    let channel = test_channel(&server.uri());
+    let channel = test_channel(&server.uri()).await;
     // Message is ONLY the attachment marker — no surrounding text
     let msg = SendMessage::new("[DOCUMENT:https://example.com/file.html]", "300");
 

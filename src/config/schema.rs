@@ -24,6 +24,7 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "provider.openrouter",
     "channel.dingtalk",
     "channel.discord",
+    "channel.feishu",
     "channel.lark",
     "channel.matrix",
     "channel.mattermost",
@@ -1022,7 +1023,7 @@ impl Default for BrowserComputerUseConfig {
 /// Controls the `browser_open` tool and browser automation backends.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserConfig {
-    /// Enable `browser_open` tool (opens URLs in Brave without scraping)
+    /// Enable `browser_open` tool (opens URLs in the system browser without scraping)
     #[serde(default)]
     pub enabled: bool,
     /// Allowed domains for `browser_open` (exact or subdomain match)
@@ -1084,7 +1085,7 @@ pub struct HttpRequestConfig {
     /// Allowed domains for HTTP requests (exact or subdomain match)
     #[serde(default)]
     pub allowed_domains: Vec<String>,
-    /// Maximum response size in bytes (default: 1MB)
+    /// Maximum response size in bytes (default: 1MB, 0 = unlimited)
     #[serde(default = "default_http_max_response_size")]
     pub max_response_size: usize,
     /// Request timeout in seconds (default: 30)
@@ -2379,6 +2380,15 @@ pub struct HeartbeatConfig {
     pub enabled: bool,
     /// Interval in minutes between heartbeat pings. Default: `30`.
     pub interval_minutes: u32,
+    /// Optional fallback task text when `HEARTBEAT.md` has no task entries.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Optional delivery channel for heartbeat output (for example: `telegram`).
+    #[serde(default, alias = "channel")]
+    pub target: Option<String>,
+    /// Optional delivery recipient/chat identifier (required when `target` is set).
+    #[serde(default, alias = "recipient")]
+    pub to: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -2386,6 +2396,9 @@ impl Default for HeartbeatConfig {
         Self {
             enabled: false,
             interval_minutes: 30,
+            message: None,
+            target: None,
+            to: None,
         }
     }
 }
@@ -2542,8 +2555,10 @@ pub struct ChannelsConfig {
     pub email: Option<crate::channels::email_channel::EmailConfig>,
     /// IRC channel configuration.
     pub irc: Option<IrcConfig>,
-    /// Lark/Feishu channel configuration.
+    /// Lark channel configuration.
     pub lark: Option<LarkConfig>,
+    /// Feishu channel configuration.
+    pub feishu: Option<FeishuConfig>,
     /// DingTalk channel configuration.
     pub dingtalk: Option<DingTalkConfig>,
     /// QQ Official Bot channel configuration.
@@ -2618,6 +2633,10 @@ impl ChannelsConfig {
                 self.lark.is_some(),
             ),
             (
+                Box::new(ConfigWrapper::new(&self.feishu)),
+                self.feishu.is_some(),
+            ),
+            (
                 Box::new(ConfigWrapper::new(&self.dingtalk)),
                 self.dingtalk.is_some(),
             ),
@@ -2668,6 +2687,7 @@ impl Default for ChannelsConfig {
             email: None,
             irc: None,
             lark: None,
+            feishu: None,
             dingtalk: None,
             qq: None,
             nostr: None,
@@ -3100,7 +3120,9 @@ pub struct LarkConfig {
     /// Allowed user IDs or union IDs (empty = deny all, "*" = allow all)
     #[serde(default)]
     pub allowed_users: Vec<String>,
-    /// Whether to use the Feishu (Chinese) endpoint instead of Lark (International)
+    /// Legacy compatibility flag: route this Lark config to Feishu endpoint.
+    ///
+    /// Prefer `[channels_config.feishu]` for new setups.
     #[serde(default)]
     pub use_feishu: bool,
     /// Event receive mode: "websocket" (default) or "webhook"
@@ -3114,10 +3136,44 @@ pub struct LarkConfig {
 
 impl ChannelConfig for LarkConfig {
     fn name() -> &'static str {
-        "Lark/Feishu"
+        "Lark"
     }
     fn desc() -> &'static str {
-        "Lark/Feishu Bot"
+        "Lark Bot"
+    }
+}
+
+/// Feishu configuration for messaging integration.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeishuConfig {
+    /// App ID from Feishu developer console
+    pub app_id: String,
+    /// App Secret from Feishu developer console
+    pub app_secret: String,
+    /// Encrypt key for webhook message decryption (optional)
+    #[serde(default)]
+    pub encrypt_key: Option<String>,
+    /// Verification token for webhook validation (optional)
+    #[serde(default)]
+    pub verification_token: Option<String>,
+    /// Allowed user IDs or union IDs (empty = deny all, "*" = allow all)
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    /// Event receive mode: "websocket" (default) or "webhook"
+    #[serde(default)]
+    pub receive_mode: LarkReceiveMode,
+    /// HTTP port for webhook mode only. Must be set when receive_mode = "webhook".
+    /// Not required (and ignored) for websocket mode.
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+impl ChannelConfig for FeishuConfig {
+    fn name() -> &'static str {
+        "Feishu"
+    }
+    fn desc() -> &'static str {
+        "Feishu Bot"
     }
 }
 
@@ -3902,8 +3958,25 @@ impl Config {
             let contents = fs::read_to_string(&config_path)
                 .await
                 .context("Failed to read config file")?;
-            let mut config: Config =
-                toml::from_str(&contents).context("Failed to parse config file")?;
+
+            // Track ignored/unknown config keys to warn users about silent misconfigurations
+            // (e.g., using [providers.ollama] which doesn't exist instead of top-level api_url)
+            let mut ignored_paths: Vec<String> = Vec::new();
+            let mut config: Config = serde_ignored::deserialize(
+                toml::de::Deserializer::parse(&contents).context("Failed to parse config file")?,
+                |path| {
+                    ignored_paths.push(path.to_string());
+                },
+            )
+            .context("Failed to deserialize config file")?;
+
+            // Warn about each unknown config key
+            for path in ignored_paths {
+                tracing::warn!(
+                    "Unknown config key ignored: \"{}\". Check config.toml for typos or deprecated options.",
+                    path
+                );
+            }
             // Set computed paths that are skipped during serialization
             config.config_path = config_path.clone();
             config.workspace_dir = workspace_dir;
@@ -4496,6 +4569,20 @@ impl Config {
             anyhow::bail!("Failed to atomically replace config file: {e}");
         }
 
+        #[cfg(unix)]
+        {
+            use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+            if let Err(err) =
+                fs::set_permissions(&self.config_path, Permissions::from_mode(0o600)).await
+            {
+                tracing::warn!(
+                    "Failed to harden config permissions to 0600 at {}: {}",
+                    self.config_path.display(),
+                    err
+                );
+            }
+        }
+
         sync_directory(parent_dir).await?;
 
         if had_existing_config {
@@ -4528,9 +4615,9 @@ async fn sync_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     #[cfg(unix)]
-    use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use tokio::sync::{Mutex, MutexGuard};
     use tokio::test;
     use tokio_stream::wrappers::ReadDirStream;
@@ -4645,6 +4732,26 @@ mod tests {
         let h = HeartbeatConfig::default();
         assert!(!h.enabled);
         assert_eq!(h.interval_minutes, 30);
+        assert!(h.message.is_none());
+        assert!(h.target.is_none());
+        assert!(h.to.is_none());
+    }
+
+    #[test]
+    async fn heartbeat_config_parses_delivery_aliases() {
+        let raw = r#"
+enabled = true
+interval_minutes = 10
+message = "Ping"
+channel = "telegram"
+recipient = "42"
+"#;
+        let parsed: HeartbeatConfig = toml::from_str(raw).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.interval_minutes, 10);
+        assert_eq!(parsed.message.as_deref(), Some("Ping"));
+        assert_eq!(parsed.target.as_deref(), Some("telegram"));
+        assert_eq!(parsed.to.as_deref(), Some("42"));
     }
 
     #[test]
@@ -4754,6 +4861,9 @@ default_temperature = 0.7
             heartbeat: HeartbeatConfig {
                 enabled: true,
                 interval_minutes: 15,
+                message: Some("Check London time".into()),
+                target: Some("telegram".into()),
+                to: Some("123456".into()),
             },
             cron: CronConfig::default(),
             channels_config: ChannelsConfig {
@@ -4779,6 +4889,7 @@ default_temperature = 0.7
                 email: None,
                 irc: None,
                 lark: None,
+                feishu: None,
                 dingtalk: None,
                 qq: None,
                 nostr: None,
@@ -4822,6 +4933,12 @@ default_temperature = 0.7
         assert_eq!(parsed.runtime.kind, "docker");
         assert!(parsed.heartbeat.enabled);
         assert_eq!(parsed.heartbeat.interval_minutes, 15);
+        assert_eq!(
+            parsed.heartbeat.message.as_deref(),
+            Some("Check London time")
+        );
+        assert_eq!(parsed.heartbeat.target.as_deref(), Some("telegram"));
+        assert_eq!(parsed.heartbeat.to.as_deref(), Some("123456"));
         assert!(parsed.channels_config.telegram.is_some());
         assert_eq!(
             parsed.channels_config.telegram.unwrap().bot_token,
@@ -5336,6 +5453,7 @@ allowed_users = ["@ops:matrix.org"]
             email: None,
             irc: None,
             lark: None,
+            feishu: None,
             dingtalk: None,
             qq: None,
             nostr: None,
@@ -5548,6 +5666,7 @@ channel_id = "C123"
             email: None,
             irc: None,
             lark: None,
+            feishu: None,
             dingtalk: None,
             qq: None,
             nostr: None,
@@ -6894,6 +7013,56 @@ default_model = "legacy-model"
     }
 
     #[test]
+    async fn feishu_config_serde() {
+        let fc = FeishuConfig {
+            app_id: "cli_feishu_123".into(),
+            app_secret: "secret_abc".into(),
+            encrypt_key: Some("encrypt_key".into()),
+            verification_token: Some("verify_token".into()),
+            allowed_users: vec!["user_123".into(), "user_456".into()],
+            receive_mode: LarkReceiveMode::Websocket,
+            port: None,
+        };
+        let json = serde_json::to_string(&fc).unwrap();
+        let parsed: FeishuConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.app_id, "cli_feishu_123");
+        assert_eq!(parsed.app_secret, "secret_abc");
+        assert_eq!(parsed.encrypt_key.as_deref(), Some("encrypt_key"));
+        assert_eq!(parsed.verification_token.as_deref(), Some("verify_token"));
+        assert_eq!(parsed.allowed_users.len(), 2);
+    }
+
+    #[test]
+    async fn feishu_config_toml_roundtrip() {
+        let fc = FeishuConfig {
+            app_id: "cli_feishu_123".into(),
+            app_secret: "secret_abc".into(),
+            encrypt_key: Some("encrypt_key".into()),
+            verification_token: Some("verify_token".into()),
+            allowed_users: vec!["*".into()],
+            receive_mode: LarkReceiveMode::Webhook,
+            port: Some(9898),
+        };
+        let toml_str = toml::to_string(&fc).unwrap();
+        let parsed: FeishuConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.app_id, "cli_feishu_123");
+        assert_eq!(parsed.app_secret, "secret_abc");
+        assert_eq!(parsed.receive_mode, LarkReceiveMode::Webhook);
+        assert_eq!(parsed.port, Some(9898));
+    }
+
+    #[test]
+    async fn feishu_config_deserializes_without_optional_fields() {
+        let json = r#"{"app_id":"cli_123","app_secret":"secret"}"#;
+        let parsed: FeishuConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.encrypt_key.is_none());
+        assert!(parsed.verification_token.is_none());
+        assert!(parsed.allowed_users.is_empty());
+        assert_eq!(parsed.receive_mode, LarkReceiveMode::Websocket);
+        assert!(parsed.port.is_none());
+    }
+
+    #[test]
     async fn nextcloud_talk_config_serde() {
         let nc = NextcloudTalkConfig {
             base_url: "https://cloud.example.com".into(),
@@ -6931,16 +7100,47 @@ default_model = "legacy-model"
         config.config_path = config_path.clone();
         config.save().await.unwrap();
 
-        // Apply the same permission logic as load_or_init
-        fs::set_permissions(&config_path, Permissions::from_mode(0o600))
-            .await
-            .expect("Failed to set permissions");
-
         let meta = fs::metadata(&config_path).await.unwrap();
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o600,
             "New config file should be owner-only (0600), got {mode:o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    async fn save_restricts_existing_world_readable_config_to_owner_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let mut config = Config::default();
+        config.config_path = config_path.clone();
+        config.save().await.unwrap();
+
+        // Simulate the regression state observed in issue #1345.
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let loose_mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            loose_mode, 0o644,
+            "test setup requires world-readable config"
+        );
+
+        config.default_temperature = 0.6;
+        config.save().await.unwrap();
+
+        let hardened_mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            hardened_mode, 0o600,
+            "Saving config should restore owner-only permissions (0600)"
         );
     }
 

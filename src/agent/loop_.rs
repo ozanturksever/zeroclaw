@@ -1494,6 +1494,59 @@ fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
         }
     }
 
+    // Try ```tool <name> format used by some providers (e.g., xAI grok)
+    // Example: ```tool file_write\n{"path": "...", "content": "..."}\n```
+    if calls.is_empty() {
+        static MD_TOOL_NAME_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?s)```tool\s+(\w+)\s*\n(.*?)(?:```|$)").unwrap());
+        let mut md_text_parts: Vec<String> = Vec::new();
+        let mut last_end = 0;
+
+        for cap in MD_TOOL_NAME_RE.captures_iter(response) {
+            let full_match = cap.get(0).unwrap();
+            let before = &response[last_end..full_match.start()];
+            if !before.trim().is_empty() {
+                md_text_parts.push(before.trim().to_string());
+            }
+            let tool_name = &cap[1];
+            let inner = &cap[2];
+
+            // Try to parse the inner content as JSON arguments
+            let json_values = extract_json_values(inner);
+            if !json_values.is_empty() {
+                for value in json_values {
+                    let arguments = if value.is_object() {
+                        value
+                    } else {
+                        serde_json::Value::Object(serde_json::Map::new())
+                    };
+                    calls.push(ParsedToolCall {
+                        name: tool_name.to_string(),
+                        arguments,
+                        tool_call_id: None,
+                    });
+                }
+            } else {
+                // Log a warning if we found a tool block but couldn't parse arguments
+                tracing::warn!(
+                    tool_name = %tool_name,
+                    inner = %inner.chars().take(100).collect::<String>(),
+                    "Found ```tool <name> block but could not parse JSON arguments"
+                );
+            }
+            last_end = full_match.end();
+        }
+
+        if !calls.is_empty() {
+            let after = &response[last_end..];
+            if !after.trim().is_empty() {
+                md_text_parts.push(after.trim().to_string());
+            }
+            text_parts = md_text_parts;
+            remaining = "";
+        }
+    }
+
     // XML attribute-style tool calls:
     // <minimax:toolcall>
     // <invoke name="shell">
@@ -1643,6 +1696,11 @@ fn detect_tool_call_parse_issue(response: &str, parsed_calls: &[ParsedToolCall])
         || trimmed.contains("```tool_call")
         || trimmed.contains("```toolcall")
         || trimmed.contains("```tool-call")
+        || trimmed.contains("```tool file_")
+        || trimmed.contains("```tool shell")
+        || trimmed.contains("```tool web_")
+        || trimmed.contains("```tool memory_")
+        || trimmed.contains("```tool ") // Generic ```tool <name> pattern
         || trimmed.contains("\"tool_calls\"")
         || trimmed.contains("TOOL_CALL")
         || trimmed.contains("<FunctionCall>");
@@ -1669,7 +1727,11 @@ fn parse_structured_tool_calls(tool_calls: &[ToolCall]) -> Vec<ParsedToolCall> {
 /// Build assistant history entry in JSON format for native tool-call APIs.
 /// `convert_messages` in the OpenRouter provider parses this JSON to reconstruct
 /// the proper `NativeMessage` with structured `tool_calls`.
-fn build_native_assistant_history(text: &str, tool_calls: &[ToolCall]) -> String {
+fn build_native_assistant_history(
+    text: &str,
+    tool_calls: &[ToolCall],
+    reasoning_content: Option<&str>,
+) -> String {
     let calls_json: Vec<serde_json::Value> = tool_calls
         .iter()
         .map(|tc| {
@@ -1687,16 +1749,25 @@ fn build_native_assistant_history(text: &str, tool_calls: &[ToolCall]) -> String
         serde_json::Value::String(text.trim().to_string())
     };
 
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "content": content,
         "tool_calls": calls_json,
-    })
-    .to_string()
+    });
+
+    if let Some(rc) = reasoning_content {
+        obj.as_object_mut().unwrap().insert(
+            "reasoning_content".to_string(),
+            serde_json::Value::String(rc.to_string()),
+        );
+    }
+
+    obj.to_string()
 }
 
 fn build_native_assistant_history_from_parsed_calls(
     text: &str,
     tool_calls: &[ParsedToolCall],
+    reasoning_content: Option<&str>,
 ) -> Option<String> {
     let calls_json = tool_calls
         .iter()
@@ -1715,13 +1786,19 @@ fn build_native_assistant_history_from_parsed_calls(
         serde_json::Value::String(text.trim().to_string())
     };
 
-    Some(
-        serde_json::json!({
-            "content": content,
-            "tool_calls": calls_json,
-        })
-        .to_string(),
-    )
+    let mut obj = serde_json::json!({
+        "content": content,
+        "tool_calls": calls_json,
+    });
+
+    if let Some(rc) = reasoning_content {
+        obj.as_object_mut().unwrap().insert(
+            "reasoning_content".to_string(),
+            serde_json::Value::String(rc.to_string()),
+        );
+    }
+
+    Some(obj.to_string())
 }
 
 fn build_assistant_history_with_tool_calls(text: &str, tool_calls: &[ToolCall]) -> String {
@@ -2169,15 +2246,24 @@ pub(crate) async fn run_tool_call_loop(
 
                     // Preserve native tool call IDs in assistant history so role=tool
                     // follow-up messages can reference the exact call id.
+                    let reasoning_content = resp.reasoning_content.clone();
                     let assistant_history_content = if resp.tool_calls.is_empty() {
                         if use_native_tools {
-                            build_native_assistant_history_from_parsed_calls(&response_text, &calls)
-                                .unwrap_or_else(|| response_text.clone())
+                            build_native_assistant_history_from_parsed_calls(
+                                &response_text,
+                                &calls,
+                                reasoning_content.as_deref(),
+                            )
+                            .unwrap_or_else(|| response_text.clone())
                         } else {
                             response_text.clone()
                         }
                     } else {
-                        build_native_assistant_history(&response_text, &resp.tool_calls)
+                        build_native_assistant_history(
+                            &response_text,
+                            &resp.tool_calls,
+                            reasoning_content.as_deref(),
+                        )
                     };
 
                     let native_calls = resp.tool_calls;
@@ -2804,7 +2890,7 @@ pub async fn run(
     if config.browser.enabled {
         tool_descs.push((
             "browser_open",
-            "Open approved HTTPS URLs in Brave Browser (allowlist-only, no scraping)",
+            "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
         ));
     }
     if config.composio.enabled {
@@ -2910,10 +2996,11 @@ pub async fn run(
             .map(|r| build_hardware_context(r, &msg, &board_names, rag_limit))
             .unwrap_or_default();
         let context = format!("{mem_context}{hw_context}");
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
-            msg.clone()
+            format!("[{now}] {msg}")
         } else {
-            format!("{context}{msg}")
+            format!("{context}[{now}] {msg}")
         };
 
         let mut history = vec![
@@ -3034,10 +3121,11 @@ pub async fn run(
                 .map(|r| build_hardware_context(r, &user_input, &board_names, rag_limit))
                 .unwrap_or_default();
             let context = format!("{mem_context}{hw_context}");
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
             let enriched = if context.is_empty() {
-                user_input.clone()
+                format!("[{now}] {user_input}")
             } else {
-                format!("{context}{user_input}")
+                format!("{context}[{now}] {user_input}")
             };
 
             history.push(ChatMessage::user(&enriched));
@@ -3265,10 +3353,11 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         .map(|r| build_hardware_context(r, message, &board_names, rag_limit))
         .unwrap_or_default();
     let context = format!("{mem_context}{hw_context}");
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
     let enriched = if context.is_empty() {
-        message.to_string()
+        format!("[{now}] {message}")
     } else {
-        format!("{context}{message}")
+        format!("{context}[{now}] {message}")
     };
 
     let mut history = vec![
@@ -3387,6 +3476,7 @@ mod tests {
                 text: Some("vision-ok".to_string()),
                 tool_calls: Vec::new(),
                 usage: None,
+                reasoning_content: None,
             })
         }
     }
@@ -3404,6 +3494,7 @@ mod tests {
                     text: Some(text.to_string()),
                     tool_calls: Vec::new(),
                     usage: None,
+                    reasoning_content: None,
                 })
                 .collect();
             Self {
@@ -4203,6 +4294,64 @@ Done."#;
             "date"
         );
         assert!(text.contains("Checking."));
+        assert!(text.contains("Done."));
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_tool_name_fence_format() {
+        // Issue #1420: xAI grok models use ```tool <name> format
+        let response = r#"I'll write a test file.
+```tool file_write
+{"path": "/home/user/test.txt", "content": "Hello world"}
+```
+Done."#;
+
+        let (text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_write");
+        assert_eq!(
+            calls[0].arguments.get("path").unwrap().as_str().unwrap(),
+            "/home/user/test.txt"
+        );
+        assert!(text.contains("I'll write a test file."));
+        assert!(text.contains("Done."));
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_tool_name_fence_shell() {
+        // Issue #1420: Test shell command in ```tool shell format
+        let response = r#"```tool shell
+{"command": "ls -la"}
+```"#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").unwrap().as_str().unwrap(),
+            "ls -la"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_multiple_tool_name_fences() {
+        // Multiple tool calls in ```tool <name> format
+        let response = r#"First, I'll write a file.
+```tool file_write
+{"path": "/tmp/a.txt", "content": "A"}
+```
+Then read it.
+```tool file_read
+{"path": "/tmp/a.txt"}
+```
+Done."#;
+
+        let (text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "file_write");
+        assert_eq!(calls[1].name, "file_read");
+        assert!(text.contains("First, I'll write a file."));
+        assert!(text.contains("Then read it."));
         assert!(text.contains("Done."));
     }
 
@@ -5273,5 +5422,69 @@ Let me check the result."#;
         // Tool names with special characters should be rejected
         assert!(parse_glm_shortened_body("not-a-tool>value").is_none());
         assert!(parse_glm_shortened_body("tool name>value").is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // reasoning_content pass-through tests for history builders
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn build_native_assistant_history_includes_reasoning_content() {
+        let calls = vec![ToolCall {
+            id: "call_1".into(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+        }];
+        let result = build_native_assistant_history("answer", &calls, Some("thinking step"));
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["content"].as_str(), Some("answer"));
+        assert_eq!(parsed["reasoning_content"].as_str(), Some("thinking step"));
+        assert!(parsed["tool_calls"].is_array());
+    }
+
+    #[test]
+    fn build_native_assistant_history_omits_reasoning_content_when_none() {
+        let calls = vec![ToolCall {
+            id: "call_1".into(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+        }];
+        let result = build_native_assistant_history("answer", &calls, None);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["content"].as_str(), Some("answer"));
+        assert!(parsed.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn build_native_assistant_history_from_parsed_calls_includes_reasoning_content() {
+        let calls = vec![ParsedToolCall {
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "pwd"}),
+            tool_call_id: Some("call_2".into()),
+        }];
+        let result = build_native_assistant_history_from_parsed_calls(
+            "answer",
+            &calls,
+            Some("deep thought"),
+        );
+        assert!(result.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["content"].as_str(), Some("answer"));
+        assert_eq!(parsed["reasoning_content"].as_str(), Some("deep thought"));
+        assert!(parsed["tool_calls"].is_array());
+    }
+
+    #[test]
+    fn build_native_assistant_history_from_parsed_calls_omits_reasoning_content_when_none() {
+        let calls = vec![ParsedToolCall {
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "pwd"}),
+            tool_call_id: Some("call_2".into()),
+        }];
+        let result = build_native_assistant_history_from_parsed_calls("answer", &calls, None);
+        assert!(result.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["content"].as_str(), Some("answer"));
+        assert!(parsed.get("reasoning_content").is_none());
     }
 }

@@ -49,103 +49,40 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     Ok(t)
 }
 
-// Re-export all shared modules from the library crate to avoid type duplication.
-// Only `skillforge` is binary-only (not in lib.rs).
-// See: `mod rag` was already migrated to this pattern.
-mod agent {
-    pub use zeroclaw::agent::*;
-}
-mod approval {
-    pub use zeroclaw::approval::*;
-}
-mod auth {
-    pub use zeroclaw::auth::*;
-}
-mod channels {
-    pub use zeroclaw::channels::*;
-}
-mod config {
-    pub use zeroclaw::config::*;
-}
-mod cost {
-    pub use zeroclaw::cost::*;
-}
-mod cron {
-    pub use zeroclaw::cron::*;
-}
-mod daemon {
-    pub use zeroclaw::daemon::*;
-}
-mod doctor {
-    pub use zeroclaw::doctor::*;
-}
-mod gateway {
-    pub use zeroclaw::gateway::*;
-}
-mod hardware {
-    pub use zeroclaw::hardware::*;
-}
-mod health {
-    pub use zeroclaw::health::*;
-}
-mod heartbeat {
-    pub use zeroclaw::heartbeat::*;
-}
-mod hooks {
-    pub use zeroclaw::hooks::*;
-}
-mod identity {
-    pub use zeroclaw::identity::*;
-}
-mod integrations {
-    pub use zeroclaw::integrations::*;
-}
-mod memory {
-    pub use zeroclaw::memory::*;
-}
-mod migration {
-    pub use zeroclaw::migration::*;
-}
-mod multimodal {
-    pub use zeroclaw::multimodal::*;
-}
-mod observability {
-    pub use zeroclaw::observability::*;
-}
-mod onboard {
-    pub use zeroclaw::onboard::*;
-}
-mod peripherals {
-    pub use zeroclaw::peripherals::*;
-}
-mod providers {
-    pub use zeroclaw::providers::*;
-}
+mod agent;
+mod approval;
+mod auth;
+mod channels;
 mod rag {
     pub use zeroclaw::rag::*;
 }
-mod runtime {
-    pub use zeroclaw::runtime::*;
-}
-mod security {
-    pub use zeroclaw::security::*;
-}
-mod service {
-    pub use zeroclaw::service::*;
-}
-mod skillforge; // binary-only — not in lib.rs
-mod skills {
-    pub use zeroclaw::skills::*;
-}
-mod tools {
-    pub use zeroclaw::tools::*;
-}
-mod tunnel {
-    pub use zeroclaw::tunnel::*;
-}
-mod util {
-    pub use zeroclaw::util::*;
-}
+mod config;
+mod cost;
+mod cron;
+mod daemon;
+mod doctor;
+mod gateway;
+mod hardware;
+mod health;
+mod heartbeat;
+mod hooks;
+mod identity;
+mod integrations;
+mod memory;
+mod migration;
+mod multimodal;
+mod observability;
+mod onboard;
+mod peripherals;
+mod providers;
+mod runtime;
+mod security;
+mod service;
+mod skillforge;
+mod skills;
+mod tools;
+mod tunnel;
+mod util;
 #[cfg(feature = "dink")]
 mod dink {
     pub use zeroclaw::dink::*;
@@ -199,10 +136,6 @@ struct Cli {
     command: Commands,
 }
 
-use zeroclaw::{
-    ChannelCommands, CronCommands, IntegrationCommands, MigrateCommands, ServiceCommands,
-    SkillCommands,
-};
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Initialize your workspace and configuration
@@ -668,6 +601,19 @@ enum ModelCommands {
         #[arg(long)]
         force: bool,
     },
+    /// List cached models for a provider
+    List {
+        /// Provider name (defaults to configured default provider)
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Set the default model in config
+    Set {
+        /// Model name to set as default
+        model: String,
+    },
+    /// Show current model configuration and cache status
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1022,6 +968,11 @@ async fn main() -> Result<()> {
             ModelCommands::Refresh { provider, force } => {
                 onboard::run_models_refresh(&config, provider.as_deref(), force).await
             }
+            ModelCommands::List { provider } => {
+                onboard::run_models_list(&config, provider.as_deref()).await
+            }
+            ModelCommands::Set { model } => onboard::run_models_set(&config, &model).await,
+            ModelCommands::Status => onboard::run_models_status(&config).await,
         },
 
         Commands::Providers => {
