@@ -69,7 +69,8 @@ impl Tool for MemoryStoreTool {
 
         if let Err(error) = self
             .security
-            .enforce_tool_operation(ToolOperation::Act, "memory_store").await
+            .enforce_tool_operation(ToolOperation::Act, "memory_store")
+            .await
         {
             return Ok(ToolResult {
                 success: false,

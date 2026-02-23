@@ -6,10 +6,10 @@
 use crate::config::AutonomyConfig;
 use crate::security::AutonomyLevel;
 use chrono::Utc;
-use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
+use tokio::sync::Mutex;
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -289,7 +289,8 @@ mod tests {
             &serde_json::json!({"path": "test.txt"}),
             ApprovalResponse::Always,
             "cli",
-        ).await;
+        )
+        .await;
 
         // Now file_write should be in session allowlist.
         assert!(!mgr.needs_approval("file_write").await);
@@ -305,7 +306,8 @@ mod tests {
             &serde_json::json!({"command": "ls"}),
             ApprovalResponse::Always,
             "cli",
-        ).await;
+        )
+        .await;
 
         // shell is in always_ask, so it still needs approval.
         assert!(mgr.needs_approval("shell").await);
@@ -319,7 +321,8 @@ mod tests {
             &serde_json::json!({}),
             ApprovalResponse::Yes,
             "cli",
-        ).await;
+        )
+        .await;
         assert!(mgr.needs_approval("file_write").await);
     }
 
@@ -334,13 +337,15 @@ mod tests {
             &serde_json::json!({"command": "rm -rf ./build/"}),
             ApprovalResponse::No,
             "cli",
-        ).await;
+        )
+        .await;
         mgr.record_decision(
             "file_write",
             &serde_json::json!({"path": "out.txt", "content": "hello"}),
             ApprovalResponse::Yes,
             "cli",
-        ).await;
+        )
+        .await;
 
         let log = mgr.audit_log().await;
         assert_eq!(log.len(), 2);
@@ -358,7 +363,8 @@ mod tests {
             &serde_json::json!({"command": "ls"}),
             ApprovalResponse::Yes,
             "telegram",
-        ).await;
+        )
+        .await;
 
         let log = mgr.audit_log().await;
         assert_eq!(log.len(), 1);

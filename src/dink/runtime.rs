@@ -4,10 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use dink_sdk::edge::EdgeClient;
 use dink_sdk::center::CenterClient;
+use dink_sdk::edge::{EdgeClient, ConnectionMonitor};
 use dink_sdk::{CenterConfig, EdgeConfig, ServiceHandler};
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::config::DinkConfig;
@@ -20,7 +19,6 @@ pub struct DinkRuntime {
     edge_client: Option<Arc<EdgeClient>>,
     center_client: Option<Arc<CenterClient>>,
     config: DinkConfig,
-    connected: Arc<RwLock<bool>>,
 }
 
 impl DinkRuntime {
@@ -34,7 +32,10 @@ impl DinkRuntime {
 
         // ── Edge client (optional) ──────────────────────────────────
         let edge_client = if config.expose_as_edge && !config.edge_key.is_empty() {
-            info!("Dink: connecting as edge (labels: {:?})", config.edge_labels);
+            info!(
+                "Dink: connecting as edge (labels: {:?})",
+                config.edge_labels
+            );
 
             let edge_config = EdgeConfig {
                 api_key: config.edge_key.clone(),
@@ -107,7 +108,6 @@ impl DinkRuntime {
             edge_client,
             center_client,
             config: config.clone(),
-            connected: Arc::new(RwLock::new(true)),
         })
     }
 
@@ -126,9 +126,22 @@ impl DinkRuntime {
         &self.config
     }
 
-    /// Whether the runtime is currently connected.
-    pub async fn is_connected(&self) -> bool {
-        *self.connected.read().await
+    /// Returns the ConnectionMonitor from the EdgeClient, if available.
+    ///
+    /// This provides real-time NATS connection state tracking via the
+    /// dink-sdk 0.3 event_callback mechanism.
+    pub fn connection_monitor(&self) -> Option<&ConnectionMonitor> {
+        self.edge_client
+            .as_ref()
+            .map(|c| c.connection_monitor())
+    }
+
+    /// Whether the edge connection is currently alive.
+    ///
+    /// Returns `true` if no edge client is configured (nothing to be dead).
+    pub fn is_connected(&self) -> bool {
+        self.connection_monitor()
+            .map_or(true, |m| m.is_connected())
     }
 
     /// Expose a service handler on the edge client.
@@ -136,16 +149,19 @@ impl DinkRuntime {
     /// Fails if no edge client is available (i.e. `expose_as_edge` was false
     /// or `edge_key` was empty).
     pub async fn expose_service(&self, handler: Arc<dyn ServiceHandler>) -> Result<()> {
-        let client = self
-            .edge_client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!(
+        let client = self.edge_client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
                 "Cannot expose service: EdgeClient is not connected \
                  (set expose_as_edge = true and provide an edge_key)"
-            ))?;
+            )
+        })?;
 
         let def = handler.definition();
-        info!("Dink: exposing service '{}' ({} methods)", def.name, def.methods.len());
+        info!(
+            "Dink: exposing service '{}' ({} methods)",
+            def.name,
+            def.methods.len()
+        );
         client.expose_service(handler).await?;
         Ok(())
     }
@@ -160,13 +176,12 @@ impl DinkRuntime {
         method: &str,
         req: &[u8],
     ) -> Result<Vec<u8>> {
-        let client = self
-            .center_client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!(
+        let client = self.center_client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
                 "Cannot call edge: CenterClient is not connected \
                  (provide a center_api_key in dink config)"
-            ))?;
+            )
+        })?;
 
         debug!(edge_id, service, method, "Dink: calling edge");
         let resp = client.call_edge(edge_id, service, method, req).await?;
@@ -186,28 +201,22 @@ impl DinkRuntime {
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
     {
-        let client = self
-            .center_client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!(
+        let client = self.center_client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
                 "Cannot call edge: CenterClient is not connected \
                  (provide a center_api_key in dink config)"
-            ))?;
+            )
+        })?;
 
         debug!(edge_id, service, method, "Dink: calling edge (typed)");
-        let resp = client.call_typed::<Req, Resp>(edge_id, service, method, req).await?;
+        let resp = client
+            .call_typed::<Req, Resp>(edge_id, service, method, req)
+            .await?;
         Ok(resp)
     }
 
     /// Disconnect both edge and center clients.
     pub async fn disconnect(&self) -> Result<()> {
-        let mut connected = self.connected.write().await;
-
-        if !*connected {
-            debug!("Dink: already disconnected");
-            return Ok(());
-        }
-
         if let Some(ref client) = self.edge_client {
             info!("Dink: disconnecting edge client");
             client.disconnect().await?;
@@ -218,18 +227,7 @@ impl DinkRuntime {
             client.disconnect().await?;
         }
 
-        *connected = false;
         info!("Dink: fully disconnected");
         Ok(())
-    }
-}
-
-impl Drop for DinkRuntime {
-    fn drop(&mut self) {
-        if let Ok(connected) = self.connected.try_read() {
-            if *connected {
-                warn!("DinkRuntime dropped while still connected — call disconnect() explicitly");
-            }
-        }
     }
 }

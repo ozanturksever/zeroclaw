@@ -29,3 +29,5 @@ venv/
 *.pem
 credentials.json
 .worktrees/
+.direnv/
+BUG-dink-liveness.md

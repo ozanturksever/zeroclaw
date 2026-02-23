@@ -1,9 +1,9 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::Mutex;
 use serde_json::json;
 use std::collections::HashMap;
+use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 

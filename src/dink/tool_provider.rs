@@ -109,8 +109,7 @@ impl DinkToolProvider {
                 }
 
                 for method in methods {
-                    let schema = known_schema(service_name, method)
-                        .unwrap_or_else(generic_schema);
+                    let schema = known_schema(service_name, method).unwrap_or_else(generic_schema);
                     let description = known_description(service_name, method);
 
                     tools.push(Box::new(DinkServiceTool::new(
@@ -234,35 +233,17 @@ fn generic_schema() -> serde_json::Value {
 fn known_description(service: &str, method: &str) -> String {
     match (service, method) {
         // AgentToolsService
-        ("AgentToolsService", "ExecCommand") => {
-            "Execute a shell command in a sandbox".into()
-        }
-        ("AgentToolsService", "ReadFile") => {
-            "Read a file from a sandbox filesystem".into()
-        }
-        ("AgentToolsService", "WriteFile") => {
-            "Write a file to a sandbox filesystem".into()
-        }
-        ("AgentToolsService", "ListFiles") => {
-            "List files in a sandbox directory".into()
-        }
-        ("AgentToolsService", "SearchCodebase") => {
-            "Search code in a sandbox using ripgrep".into()
-        }
+        ("AgentToolsService", "ExecCommand") => "Execute a shell command in a sandbox".into(),
+        ("AgentToolsService", "ReadFile") => "Read a file from a sandbox filesystem".into(),
+        ("AgentToolsService", "WriteFile") => "Write a file to a sandbox filesystem".into(),
+        ("AgentToolsService", "ListFiles") => "List files in a sandbox directory".into(),
+        ("AgentToolsService", "SearchCodebase") => "Search code in a sandbox using ripgrep".into(),
 
         // ZeroClawService
-        ("ZeroClawService", "SendMessage") => {
-            "Send a message to a ZeroClaw instance".into()
-        }
-        ("ZeroClawService", "GetStatus") => {
-            "Get status of a ZeroClaw instance".into()
-        }
-        ("ZeroClawService", "RecallMemory") => {
-            "Recall memories from a ZeroClaw instance".into()
-        }
-        ("ZeroClawService", "Shutdown") => {
-            "Shutdown a ZeroClaw instance".into()
-        }
+        ("ZeroClawService", "SendMessage") => "Send a message to a ZeroClaw instance".into(),
+        ("ZeroClawService", "GetStatus") => "Get status of a ZeroClaw instance".into(),
+        ("ZeroClawService", "RecallMemory") => "Recall memories from a ZeroClaw instance".into(),
+        ("ZeroClawService", "Shutdown") => "Shutdown a ZeroClaw instance".into(),
 
         _ => format!("Call {service}.{method} via Dink RPC"),
     }

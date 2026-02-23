@@ -104,6 +104,9 @@ ENV ZEROCLAW_GATEWAY_PORT=42617
 WORKDIR /zeroclaw-data
 USER 65534:65534
 EXPOSE 42617
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -sf http://localhost:9468/v1/health || exit 1
 ENTRYPOINT ["zeroclaw"]
 CMD ["gateway"]
 
@@ -126,5 +129,7 @@ ENV ZEROCLAW_GATEWAY_PORT=42617
 WORKDIR /zeroclaw-data
 USER 65534:65534
 EXPOSE 42617
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/zeroclaw", "health-check"]
 ENTRYPOINT ["zeroclaw"]
 CMD ["gateway"]

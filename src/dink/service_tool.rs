@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::tools::traits::{Tool, ToolResult};
 use super::runtime::DinkRuntime;
+use crate::tools::traits::{Tool, ToolResult};
 
 /// Maximum response size included in tool output (50 KB).
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
@@ -55,7 +55,9 @@ impl DinkServiceTool {
         description: String,
         params_schema: serde_json::Value,
     ) -> Self {
-        let svc = service_name.strip_suffix("Service").unwrap_or(&service_name);
+        let svc = service_name
+            .strip_suffix("Service")
+            .unwrap_or(&service_name);
         let tool_name = format!(
             "dink_{}_{}",
             to_snake_case(svc),
@@ -100,7 +102,12 @@ impl Tool for DinkServiceTool {
 
         let response_bytes = match self
             .runtime
-            .call_edge(&self.edge_id, &self.service_name, &self.method_name, &request_bytes)
+            .call_edge(
+                &self.edge_id,
+                &self.service_name,
+                &self.method_name,
+                &request_bytes,
+            )
             .await
         {
             Ok(bytes) => bytes,
@@ -156,7 +163,9 @@ mod tests {
     #[test]
     fn tool_name_derivation() {
         // Verify the name logic: strip "Service" suffix, then snake_case.
-        let svc = "AgentToolsService".strip_suffix("Service").unwrap_or("AgentToolsService");
+        let svc = "AgentToolsService"
+            .strip_suffix("Service")
+            .unwrap_or("AgentToolsService");
         let name = format!(
             "dink_{}_{}",
             to_snake_case(svc),

@@ -34,7 +34,8 @@ pub struct DinkChannel {
     rx: Mutex<Option<mpsc::Receiver<AgentRequest>>>,
     /// Maps message IDs to pending response oneshot senders.
     /// Key = message ID (generated in listen()), Value = oneshot::Sender.
-    pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<anyhow::Result<AgentResponse>>>>>,
+    pending:
+        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<anyhow::Result<AgentResponse>>>>>,
 }
 
 impl DinkChannel {

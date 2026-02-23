@@ -46,6 +46,8 @@ pub mod config;
 pub(crate) mod cost;
 pub(crate) mod cron;
 pub(crate) mod daemon;
+#[cfg(feature = "dink")]
+pub mod dink;
 pub(crate) mod doctor;
 pub mod gateway;
 pub(crate) mod hardware;
@@ -69,8 +71,6 @@ pub(crate) mod skills;
 pub mod tools;
 pub mod tunnel;
 pub mod util;
-#[cfg(feature = "dink")]
-pub mod dink;
 
 pub use config::Config;
 

@@ -3867,8 +3867,8 @@ impl Config {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(b64.as_bytes())
                 .context("Failed to decode ZEROCLAW_CONFIG_BASE64")?;
-            let contents = String::from_utf8(decoded)
-                .context("ZEROCLAW_CONFIG_BASE64 is not valid UTF-8")?;
+            let contents =
+                String::from_utf8(decoded).context("ZEROCLAW_CONFIG_BASE64 is not valid UTF-8")?;
             let mut config: Config =
                 toml::from_str(&contents).context("Failed to parse ZEROCLAW_CONFIG_BASE64")?;
             config.config_path = config_path.clone();

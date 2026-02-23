@@ -1,11 +1,12 @@
 use crate::multimodal;
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
-    Provider, ProviderCapabilities, StreamChunk, StreamError, StreamOptions, StreamResult, TokenUsage, ToolCall as ProviderToolCall,
+    Provider, ProviderCapabilities, StreamChunk, StreamError, StreamOptions, StreamResult,
+    TokenUsage, ToolCall as ProviderToolCall,
 };
-use futures_util::stream::{self, StreamExt};
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
+use futures_util::stream::{self, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -582,7 +583,9 @@ impl Provider for OpenRouterProvider {
             Some(value) => value.clone(),
             None => {
                 return stream::once(async {
-                    Err(StreamError::Provider("OpenRouter API key not set".to_string()))
+                    Err(StreamError::Provider(
+                        "OpenRouter API key not set".to_string(),
+                    ))
                 })
                 .boxed();
             }
@@ -624,7 +627,10 @@ impl Provider for OpenRouterProvider {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let error = response.text().await.unwrap_or_else(|_| format!("HTTP {}", status));
+                let error = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| format!("HTTP {}", status));
                 let _ = tx
                     .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
                     .await;
@@ -668,10 +674,7 @@ impl Provider for OpenRouterProvider {
                                         .and_then(|c| c.as_str())
                                     {
                                         if !delta.is_empty() {
-                                            if tx
-                                                .send(Ok(StreamChunk::delta(delta)))
-                                                .await
-                                                .is_err()
+                                            if tx.send(Ok(StreamChunk::delta(delta))).await.is_err()
                                             {
                                                 return;
                                             }

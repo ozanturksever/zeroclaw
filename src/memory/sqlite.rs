@@ -4,7 +4,6 @@ use super::vector;
 use anyhow::Context;
 use async_trait::async_trait;
 use chrono::Local;
-use tokio::sync::Mutex;
 use rusqlite::{params, Connection};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -12,6 +11,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 /// Maximum allowed open timeout (seconds) to avoid unreasonable waits.

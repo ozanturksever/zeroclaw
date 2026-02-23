@@ -52,40 +52,104 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
 // Re-export all shared modules from the library crate to avoid type duplication.
 // Only `skillforge` is binary-only (not in lib.rs).
 // See: `mod rag` was already migrated to this pattern.
-mod agent { pub use zeroclaw::agent::*; }
-mod approval { pub use zeroclaw::approval::*; }
-mod auth { pub use zeroclaw::auth::*; }
-mod channels { pub use zeroclaw::channels::*; }
-mod config { pub use zeroclaw::config::*; }
-mod cost { pub use zeroclaw::cost::*; }
-mod cron { pub use zeroclaw::cron::*; }
-mod daemon { pub use zeroclaw::daemon::*; }
-mod doctor { pub use zeroclaw::doctor::*; }
-mod gateway { pub use zeroclaw::gateway::*; }
-mod hardware { pub use zeroclaw::hardware::*; }
-mod health { pub use zeroclaw::health::*; }
-mod heartbeat { pub use zeroclaw::heartbeat::*; }
-mod hooks { pub use zeroclaw::hooks::*; }
-mod identity { pub use zeroclaw::identity::*; }
-mod integrations { pub use zeroclaw::integrations::*; }
-mod memory { pub use zeroclaw::memory::*; }
-mod migration { pub use zeroclaw::migration::*; }
-mod multimodal { pub use zeroclaw::multimodal::*; }
-mod observability { pub use zeroclaw::observability::*; }
-mod onboard { pub use zeroclaw::onboard::*; }
-mod peripherals { pub use zeroclaw::peripherals::*; }
-mod providers { pub use zeroclaw::providers::*; }
-mod rag { pub use zeroclaw::rag::*; }
-mod runtime { pub use zeroclaw::runtime::*; }
-mod security { pub use zeroclaw::security::*; }
-mod service { pub use zeroclaw::service::*; }
-mod skillforge;  // binary-only — not in lib.rs
-mod skills { pub use zeroclaw::skills::*; }
-mod tools { pub use zeroclaw::tools::*; }
-mod tunnel { pub use zeroclaw::tunnel::*; }
-mod util { pub use zeroclaw::util::*; }
+mod agent {
+    pub use zeroclaw::agent::*;
+}
+mod approval {
+    pub use zeroclaw::approval::*;
+}
+mod auth {
+    pub use zeroclaw::auth::*;
+}
+mod channels {
+    pub use zeroclaw::channels::*;
+}
+mod config {
+    pub use zeroclaw::config::*;
+}
+mod cost {
+    pub use zeroclaw::cost::*;
+}
+mod cron {
+    pub use zeroclaw::cron::*;
+}
+mod daemon {
+    pub use zeroclaw::daemon::*;
+}
+mod doctor {
+    pub use zeroclaw::doctor::*;
+}
+mod gateway {
+    pub use zeroclaw::gateway::*;
+}
+mod hardware {
+    pub use zeroclaw::hardware::*;
+}
+mod health {
+    pub use zeroclaw::health::*;
+}
+mod heartbeat {
+    pub use zeroclaw::heartbeat::*;
+}
+mod hooks {
+    pub use zeroclaw::hooks::*;
+}
+mod identity {
+    pub use zeroclaw::identity::*;
+}
+mod integrations {
+    pub use zeroclaw::integrations::*;
+}
+mod memory {
+    pub use zeroclaw::memory::*;
+}
+mod migration {
+    pub use zeroclaw::migration::*;
+}
+mod multimodal {
+    pub use zeroclaw::multimodal::*;
+}
+mod observability {
+    pub use zeroclaw::observability::*;
+}
+mod onboard {
+    pub use zeroclaw::onboard::*;
+}
+mod peripherals {
+    pub use zeroclaw::peripherals::*;
+}
+mod providers {
+    pub use zeroclaw::providers::*;
+}
+mod rag {
+    pub use zeroclaw::rag::*;
+}
+mod runtime {
+    pub use zeroclaw::runtime::*;
+}
+mod security {
+    pub use zeroclaw::security::*;
+}
+mod service {
+    pub use zeroclaw::service::*;
+}
+mod skillforge; // binary-only — not in lib.rs
+mod skills {
+    pub use zeroclaw::skills::*;
+}
+mod tools {
+    pub use zeroclaw::tools::*;
+}
+mod tunnel {
+    pub use zeroclaw::tunnel::*;
+}
+mod util {
+    pub use zeroclaw::util::*;
+}
 #[cfg(feature = "dink")]
-mod dink { pub use zeroclaw::dink::*; }
+mod dink {
+    pub use zeroclaw::dink::*;
+}
 
 use config::Config;
 
@@ -135,7 +199,10 @@ struct Cli {
     command: Commands,
 }
 
-use zeroclaw::{ServiceCommands, ChannelCommands, SkillCommands, MigrateCommands, CronCommands, IntegrationCommands};
+use zeroclaw::{
+    ChannelCommands, CronCommands, IntegrationCommands, MigrateCommands, ServiceCommands,
+    SkillCommands,
+};
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Initialize your workspace and configuration
@@ -268,6 +335,23 @@ Examples:
 
     /// Show system status (full details)
     Status,
+
+    /// Probe the health endpoint (for Docker HEALTHCHECK or manual checks)
+    #[command(long_about = "\
+Probe the local health endpoint.\
+\
+Sends an HTTP GET to http://localhost:<port>/v1/health and exits 0 on 200, \
+1 otherwise. Intended for Docker HEALTHCHECK in distroless images (no \
+shell/curl needed).\
+\
+Examples:\
+  zeroclaw health-check\
+  zeroclaw health-check --port 9468")]
+    HealthCheck {
+        /// Health server port (default: $OOSS_HEALTH_PORT or 9468)
+        #[arg(long)]
+        port: Option<u16>,
+    },
 
     /// Engage, inspect, and resume emergency-stop states.
     ///
@@ -672,6 +756,37 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // HealthCheck is a lightweight probe — skip config/logging to minimize overhead.
+    // Runs every 30s in Docker HEALTHCHECK; must not load config or init tracing.
+    if let Commands::HealthCheck { port } = &cli.command {
+        let port = port
+            .or_else(|| {
+                std::env::var("OOSS_HEALTH_PORT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(9468);
+        let url = format!("http://localhost:{port}/v1/health");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .context("failed to build HTTP client")?;
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                println!("ok");
+                return Ok(());
+            }
+            Ok(resp) => {
+                eprintln!("unhealthy: HTTP {}", resp.status());
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("health check failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Initialize logging - respects RUST_LOG env var, defaults to INFO
     let subscriber = fmt::Subscriber::builder()
         .with_env_filter(
@@ -797,6 +912,8 @@ async fn main() -> Result<()> {
             // Dink listener is spawned by daemon::run() when dink feature + config enabled
             daemon::run(config, host, port).await
         }
+
+        Commands::HealthCheck { .. } => unreachable!(),
 
         Commands::Status => {
             println!("🦀 ZeroClaw Status");
@@ -974,8 +1091,9 @@ async fn main() -> Result<()> {
                 #[cfg(feature = "dink")]
                 if config.dink.enabled {
                     let dink_cfg = config.clone();
+                    let liveness = dink::watchdog::DinkLiveness::new();
                     tokio::spawn(async move {
-                        if let Err(e) = dink::start_dink_listener(&dink_cfg).await {
+                        if let Err(e) = dink::start_dink_listener(&dink_cfg, liveness).await {
                             tracing::warn!("Dink listener failed: {e:#}");
                         }
                     });

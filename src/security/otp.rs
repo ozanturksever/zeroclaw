@@ -1,11 +1,11 @@
 use crate::config::OtpConfig;
 use crate::security::secrets::SecretStore;
 use anyhow::{Context, Result};
-use std::sync::Mutex;
 use ring::hmac;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const OTP_SECRET_FILE: &str = "otp-secret";

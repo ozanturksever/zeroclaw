@@ -185,8 +185,12 @@ impl ZeroClawEdgeService {
             .map_err(|_| dink_err("agent response channel dropped"))?
             .map_err(|e| dink_err(format!("agent error: {e}")))?;
 
-        self.messages_handled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.tool_calls_total.fetch_add(resp.tool_calls.len() as i32, std::sync::atomic::Ordering::Relaxed);
+        self.messages_handled
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.tool_calls_total.fetch_add(
+            resp.tool_calls.len() as i32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Ok(resp)
     }
 }
@@ -236,24 +240,28 @@ impl ZeroClawServiceServer for ZeroClawEdgeService {
         let mut event_count = 0u32;
         while let Some(event_value) = delta_rx.recv().await {
             event_count += 1;
-            let event_type = event_value.get("event_type").and_then(|v| v.as_str()).unwrap_or("?");
+            let event_type = event_value
+                .get("event_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
             tracing::debug!(event_count, event_type, "StreamMessage: emitting event");
             let bytes = serde_json::to_vec(&event_value)
                 .map_err(|e| dink_err(format!("serialization error: {e}")))?;
             emit(bytes)?;
         }
 
-        tracing::info!(event_count, "StreamMessage: delta channel closed, awaiting final response");
-        let _resp = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            response_rx,
-        )
-        .await
-        .map_err(|_| dink_err("stream response timed out"))?
-        .map_err(|_| dink_err("agent response channel dropped"))?
-        .map_err(|e| dink_err(format!("agent error: {e}")))?;
+        tracing::info!(
+            event_count,
+            "StreamMessage: delta channel closed, awaiting final response"
+        );
+        let _resp = tokio::time::timeout(std::time::Duration::from_secs(120), response_rx)
+            .await
+            .map_err(|_| dink_err("stream response timed out"))?
+            .map_err(|_| dink_err("agent response channel dropped"))?
+            .map_err(|e| dink_err(format!("agent error: {e}")))?;
         tracing::info!("StreamMessage: complete");
-        self.messages_handled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.messages_handled
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Small delay to let the last emit task flush to NATS before
         // the edge SDK publishes the .done signal that closes the client subscription.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -263,8 +271,12 @@ impl ZeroClawServiceServer for ZeroClawEdgeService {
     async fn get_status(&self, _req: GetStatusRequest) -> DinkResult<GetStatusResponse> {
         let status = self.status.read().await;
         let uptime_ms = self.started_at.elapsed().as_millis() as i64;
-        let msgs = self.messages_handled.load(std::sync::atomic::Ordering::Relaxed);
-        let tools = self.tool_calls_total.load(std::sync::atomic::Ordering::Relaxed);
+        let msgs = self
+            .messages_handled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let tools = self
+            .tool_calls_total
+            .load(std::sync::atomic::Ordering::Relaxed);
         let memory_bytes = (get_process_memory_mb() * 1024.0 * 1024.0) as i64;
 
         Ok(GetStatusResponse {
@@ -283,7 +295,11 @@ impl ZeroClawServiceServer for ZeroClawEdgeService {
     async fn recall_memory(&self, req: RecallMemoryRequest) -> DinkResult<RecallMemoryResponse> {
         let memory_guard = self.memory.read().await;
         let entries = if let Some(mem) = memory_guard.as_ref() {
-            let limit = if req.limit > 0 { req.limit as usize } else { 10 };
+            let limit = if req.limit > 0 {
+                req.limit as usize
+            } else {
+                10
+            };
             mem.recall(&req.query, limit, None)
                 .await
                 .unwrap_or_default()
@@ -358,7 +374,9 @@ impl ZeroClawServiceServer for ZeroClawEdgeService {
             *sender = None;
         }
         tracing::info!("Shutdown RPC received — agent channel closed");
-        let msgs = self.messages_handled.load(std::sync::atomic::Ordering::Relaxed);
+        let msgs = self
+            .messages_handled
+            .load(std::sync::atomic::Ordering::Relaxed);
         let uptime_ms = self.started_at.elapsed().as_millis() as i64;
         Ok(ShutdownResponse {
             shutdown: true,

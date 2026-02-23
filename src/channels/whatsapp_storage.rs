@@ -13,13 +13,13 @@
 #[cfg(feature = "whatsapp-web")]
 use async_trait::async_trait;
 #[cfg(feature = "whatsapp-web")]
-use tokio::sync::Mutex;
-#[cfg(feature = "whatsapp-web")]
 use rusqlite::{params, Connection};
 #[cfg(feature = "whatsapp-web")]
 use std::path::Path;
 #[cfg(feature = "whatsapp-web")]
 use std::sync::Arc;
+#[cfg(feature = "whatsapp-web")]
+use tokio::sync::Mutex;
 
 #[cfg(feature = "whatsapp-web")]
 use prost::Message;

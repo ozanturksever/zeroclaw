@@ -7,23 +7,24 @@
 //! - `PeerMessageTool`: inter-instance messaging via peer groups
 //! - `ZeroClawEdgeService`: exposes this agent as a callable Dink service
 
-pub mod generated;
-pub mod runtime;
-pub mod tool_provider;
-pub mod service_tool;
-pub mod peer_tool;
-pub mod edge_service;
 pub mod channel;
+pub mod edge_service;
+pub mod generated;
+pub mod peer_tool;
+pub mod runtime;
+pub mod service_tool;
+pub mod tool_provider;
+pub mod watchdog;
 
-pub use runtime::DinkRuntime;
-pub use tool_provider::DinkToolProvider;
-pub use service_tool::DinkServiceTool;
-pub use peer_tool::PeerMessageTool;
-pub use edge_service::{ZeroClawEdgeService, AgentRequest, AgentResponse, InstanceStatus};
 pub use channel::DinkChannel;
+pub use edge_service::{AgentRequest, AgentResponse, InstanceStatus, ZeroClawEdgeService};
+pub use peer_tool::PeerMessageTool;
+pub use runtime::DinkRuntime;
+pub use service_tool::DinkServiceTool;
+pub use tool_provider::DinkToolProvider;
 
-use std::sync::Arc;
 use crate::tools::traits::Tool;
+use std::sync::Arc;
 
 /// Discover and add Dink tools to an existing tool registry.
 /// Must be called from an async context since discovery requires network I/O.
@@ -43,7 +44,12 @@ pub async fn add_dink_tools(
         }
         Err(e) => tracing::warn!(error = %e, "Dink tool discovery failed"),
     }
-    if config.dink.services.iter().any(|s| s == "*" || s.contains("peer")) {
+    if config
+        .dink
+        .services
+        .iter()
+        .any(|s| s == "*" || s.contains("peer"))
+    {
         tools.push(Box::new(PeerMessageTool::new(dink_runtime)));
     }
 }
@@ -58,7 +64,10 @@ pub async fn add_dink_tools(
 ///
 /// Runs indefinitely until the edge service channel closes.
 /// Should be spawned as a tokio task alongside `start_channels`.
-pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Result<()> {
+pub async fn start_dink_listener(
+    config: &crate::config::Config,
+    liveness: watchdog::DinkLiveness,
+) -> anyhow::Result<()> {
     if !config.dink.enabled {
         return Ok(());
     }
@@ -66,6 +75,34 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
     let runtime = DinkRuntime::new(&config.dink)
         .await
         .map_err(|e| anyhow::anyhow!("Dink runtime connection failed: {e:#}"))?;
+
+    // -- Wire ConnectionMonitor → DinkLiveness --
+    // The dink-sdk 0.3 EdgeClient fires event callbacks on NATS
+    // disconnect/reconnect. We bridge those to our watchdog liveness.
+    if let Some(monitor) = runtime.connection_monitor() {
+        let mon = monitor.clone();
+        let liv = liveness.clone();
+        tokio::spawn(async move {
+            loop {
+                // Wait for disconnect
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if !mon.is_connected() {
+                        liv.mark_dead();
+                        tracing::warn!("ConnectionMonitor: NATS disconnected → liveness marked dead");
+                        break;
+                    }
+                }
+                // Wait for reconnect
+                mon.wait_for_reconnect().await;
+                liv.mark_alive();
+                tracing::info!("ConnectionMonitor: NATS reconnected → liveness marked alive");
+            }
+        });
+    }
+
+    // -- Watchdog: monitors liveness and exits when dead too long --
+    let _watchdog = watchdog::spawn_watchdog(liveness.clone(), watchdog::WatchdogConfig::default());
 
     let (edge_service, mut agent_rx, mut config_rx) = ZeroClawEdgeService::new();
     let edge_service = Arc::new(edge_service);
@@ -79,10 +116,12 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
     edge_service.set_memory(agent.memory_ref().clone()).await;
 
     // Mark as running
-    edge_service.update_status(edge_service::InstanceStatus {
-        status: "running".to_string(),
-        ..Default::default()
-    }).await;
+    edge_service
+        .update_status(edge_service::InstanceStatus {
+            status: "running".to_string(),
+            ..Default::default()
+        })
+        .await;
 
     loop {
         tokio::select! {
@@ -120,20 +159,30 @@ pub async fn start_dink_listener(config: &crate::config::Config) -> anyhow::Resu
             else => break,
         }
     }
+
     tracing::info!("Dink listener finished \u{2014} edge service channel closed");
     Ok(())
 }
 
 /// Minimal HTTP health server for OOSS sandbox health checks.
-/// Responds to GET /v1/health with 200 OK.
-pub async fn start_health_server() {
+/// Responds to GET /v1/health with 200 OK when alive, 503 when dead.
+pub async fn start_health_server(liveness: Option<watchdog::DinkLiveness>) {
     use axum::{routing::get, Router};
     let port: u16 = std::env::var("OOSS_HEALTH_PORT")
         .unwrap_or_else(|_| "9468".to_string())
         .parse()
         .unwrap_or(9468);
     let app = Router::new()
-        .route("/v1/health", get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }));
+        .route("/v1/health", get(move || {
+            let alive = liveness.as_ref().map_or(true, |l| l.is_alive());
+            async move {
+                if alive {
+                    (axum::http::StatusCode::OK, axum::Json(serde_json::json!({"status": "ok"})))
+                } else {
+                    (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"status": "unhealthy", "reason": "nats_disconnected"})))
+                }
+            }
+        }));
     let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
         Err(e) => {

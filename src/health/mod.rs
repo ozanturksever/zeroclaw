@@ -1,9 +1,9 @@
 use chrono::Utc;
-use tokio::sync::Mutex;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::Instant;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ComponentHealth {
@@ -64,7 +64,8 @@ pub async fn mark_component_ok(component: &str) {
         entry.status = "ok".into();
         entry.last_ok = Some(now_rfc3339());
         entry.last_error = None;
-    }).await;
+    })
+    .await;
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -73,13 +74,15 @@ pub async fn mark_component_error(component: &str, error: impl ToString) {
     upsert_component(component, move |entry| {
         entry.status = "error".into();
         entry.last_error = Some(err);
-    }).await;
+    })
+    .await;
 }
 
 pub async fn bump_component_restart(component: &str) {
     upsert_component(component, |entry| {
         entry.restart_count = entry.restart_count.saturating_add(1);
-    }).await;
+    })
+    .await;
 }
 
 pub async fn snapshot() -> HealthSnapshot {

@@ -1409,7 +1409,8 @@ fn spawn_supervised_listener_with_health_interval(
             match result {
                 Ok(()) => {
                     tracing::warn!("Channel {} exited unexpectedly; restarting", ch.name());
-                    crate::health::mark_component_error(&component, "listener exited unexpectedly").await;
+                    crate::health::mark_component_error(&component, "listener exited unexpectedly")
+                        .await;
                     // Clean exit — reset backoff since the listener ran successfully
                     backoff = initial_backoff_secs.max(1);
                 }

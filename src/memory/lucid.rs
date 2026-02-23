@@ -2,11 +2,11 @@ use super::sqlite::SqliteMemory;
 use super::traits::{Memory, MemoryCategory, MemoryEntry};
 use async_trait::async_trait;
 use chrono::Local;
-use tokio::sync::Mutex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 pub struct LucidMemory {

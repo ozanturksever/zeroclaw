@@ -231,7 +231,8 @@ impl Tool for DelegateTool {
 
         if let Err(error) = self
             .security
-            .enforce_tool_operation(ToolOperation::Act, "delegate").await
+            .enforce_tool_operation(ToolOperation::Act, "delegate")
+            .await
         {
             return Ok(ToolResult {
                 success: false,

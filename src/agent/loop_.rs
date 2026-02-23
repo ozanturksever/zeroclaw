@@ -2296,7 +2296,8 @@ pub(crate) async fn run_tool_call_loop(
         let mut individual_results: Vec<(Option<String>, String)> = Vec::new();
         let mut ordered_results: Vec<Option<(String, Option<String>, ToolExecutionOutcome)>> =
             (0..tool_calls.len()).map(|_| None).collect();
-        let allow_parallel_execution = should_execute_tools_in_parallel(&tool_calls, approval).await;
+        let allow_parallel_execution =
+            should_execute_tools_in_parallel(&tool_calls, approval).await;
         let mut executable_indices: Vec<usize> = Vec::new();
         let mut executable_calls: Vec<ParsedToolCall> = Vec::new();
 
@@ -2360,7 +2361,8 @@ pub(crate) async fn run_tool_call_loop(
                         ApprovalResponse::Yes
                     };
 
-                    mgr.record_decision(&tool_name, &tool_args, decision, channel_name).await;
+                    mgr.record_decision(&tool_name, &tool_args, decision, channel_name)
+                        .await;
 
                     if decision == ApprovalResponse::No {
                         let denied = "Denied by user.".to_string();
@@ -3718,10 +3720,7 @@ mod tests {
         let approval_cfg = crate::config::AutonomyConfig::default();
         let approval_mgr = ApprovalManager::from_config(&approval_cfg);
 
-        assert!(!should_execute_tools_in_parallel(
-            &calls,
-            Some(&approval_mgr)
-        ).await);
+        assert!(!should_execute_tools_in_parallel(&calls, Some(&approval_mgr)).await);
     }
 
     #[tokio::test]
@@ -3744,10 +3743,7 @@ mod tests {
         };
         let approval_mgr = ApprovalManager::from_config(&approval_cfg);
 
-        assert!(should_execute_tools_in_parallel(
-            &calls,
-            Some(&approval_mgr)
-        ).await);
+        assert!(should_execute_tools_in_parallel(&calls, Some(&approval_mgr)).await);
     }
 
     #[tokio::test]

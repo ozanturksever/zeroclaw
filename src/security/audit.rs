@@ -3,11 +3,11 @@
 use crate::config::AuditConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 /// Audit event types

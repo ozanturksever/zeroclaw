@@ -30,9 +30,9 @@ use super::traits::{Channel, ChannelMessage, SendMessage};
 use super::whatsapp_storage::RusqliteStore;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 use std::sync::Arc;
 use tokio::select;
+use tokio::sync::Mutex;
 
 /// WhatsApp Web channel using wa-rs with custom rusqlite storage
 ///

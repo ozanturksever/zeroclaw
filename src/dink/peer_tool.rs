@@ -94,8 +94,8 @@ impl Tool for PeerMessageTool {
             "metadata": {}
         });
 
-        let req_bytes = serde_json::to_vec(&request_body)
-            .context("failed to serialize request body")?;
+        let req_bytes =
+            serde_json::to_vec(&request_body).context("failed to serialize request body")?;
 
         let response_bytes = edge_client
             .call_peer(target_edge_id, service, method, &req_bytes)

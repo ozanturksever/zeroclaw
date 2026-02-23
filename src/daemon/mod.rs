@@ -60,17 +60,24 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
 
     #[cfg(feature = "dink")]
     {
+        // Create shared liveness tracker — health server uses it to report 503 when NATS is dead.
+        let dink_liveness = crate::dink::watchdog::DinkLiveness::new();
+
         // Start health server early — sandbox host checks /v1/health before Dink connects
-        tokio::spawn(crate::dink::start_health_server());
+        tokio::spawn(crate::dink::start_health_server(Some(
+            dink_liveness.clone(),
+        )));
         if config.dink.enabled {
             let dink_cfg = config.clone();
+            let liveness = dink_liveness.clone();
             handles.push(spawn_component_supervisor(
                 "dink",
                 initial_backoff,
                 max_backoff,
                 move || {
                     let cfg = dink_cfg.clone();
-                    async move { crate::dink::start_dink_listener(&cfg).await }
+                    let liveness = liveness.clone();
+                    async move { crate::dink::start_dink_listener(&cfg, liveness).await }
                 },
             ));
         }
@@ -172,7 +179,8 @@ where
             crate::health::mark_component_ok(name).await;
             match run_component().await {
                 Ok(()) => {
-                    crate::health::mark_component_error(name, "component exited unexpectedly").await;
+                    crate::health::mark_component_error(name, "component exited unexpectedly")
+                        .await;
                     tracing::warn!("Daemon component '{name}' exited unexpectedly");
                     // Clean exit — reset backoff since the component ran successfully
                     backoff = initial_backoff_secs.max(1);

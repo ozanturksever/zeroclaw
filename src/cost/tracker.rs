@@ -2,12 +2,12 @@ use super::types::{BudgetCheck, CostRecord, CostSummary, ModelStats, TokenUsage,
 use crate::config::schema::CostConfig;
 use anyhow::{anyhow, Context, Result};
 use chrono::{Datelike, NaiveDate, Utc};
-use tokio::sync::{Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::{Mutex, MutexGuard};
 
 /// Cost tracker for API usage monitoring and budget enforcement.
 pub struct CostTracker {
@@ -520,7 +520,10 @@ mod tests {
         file.sync_all().unwrap();
 
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
-        let today_cost = tracker.get_daily_cost(Utc::now().date_naive()).await.unwrap();
+        let today_cost = tracker
+            .get_daily_cost(Utc::now().date_naive())
+            .await
+            .unwrap();
         assert!((today_cost - valid_usage.cost_usd).abs() < f64::EPSILON);
     }
 

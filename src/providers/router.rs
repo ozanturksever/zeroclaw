@@ -340,7 +340,10 @@ mod tests {
             .unwrap();
         assert_eq!(result, "primary-response");
         assert_eq!(mocks[0].call_count(), 1);
-        assert_eq!(mocks[0].last_model().await, "anthropic/claude-sonnet-4-20250514");
+        assert_eq!(
+            mocks[0].last_model().await,
+            "anthropic/claude-sonnet-4-20250514"
+        );
     }
 
     #[test]

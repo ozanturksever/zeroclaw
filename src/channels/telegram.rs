@@ -4,9 +4,9 @@ use crate::security::pairing::PairingGuard;
 use anyhow::Context;
 use async_trait::async_trait;
 use directories::UserDirs;
-use std::sync::Mutex;
 use reqwest::multipart::{Form, Part};
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::fs;
@@ -1172,7 +1172,8 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 .and_then(serde_json::Value::as_i64);
             if let (Some(mid), Some(cid)) = (reply_mid, chat_id) {
                 self.voice_transcriptions
-                    .lock().unwrap()
+                    .lock()
+                    .unwrap()
                     .get(&format!("{cid}:{mid}"))
                     .map(|t| format!("[Voice] {t}"))
                     .unwrap_or_else(|| "[Voice message]".to_string())
@@ -2145,7 +2146,8 @@ impl Channel for TelegramChannel {
             .map(|id| id.to_string());
 
         self.last_draft_edit
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .insert(chat_id.to_string(), std::time::Instant::now());
 
         Ok(message_id)
@@ -2208,7 +2210,8 @@ impl Channel for TelegramChannel {
 
         if resp.status().is_success() {
             self.last_draft_edit
-                .lock().unwrap()
+                .lock()
+                .unwrap()
                 .insert(chat_id.clone(), std::time::Instant::now());
         } else {
             let status = resp.status();
@@ -2643,7 +2646,8 @@ mod tests {
         let off = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await;
         assert!(!off.supports_draft_updates());
 
-        let partial = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await
+        let partial = TelegramChannel::new("fake-token".into(), vec!["*".into()], false)
+            .await
             .with_streaming(StreamMode::Partial, 750);
         assert!(partial.supports_draft_updates());
         assert_eq!(partial.draft_update_interval_ms, 750);
@@ -2661,10 +2665,12 @@ mod tests {
 
     #[tokio::test]
     async fn update_draft_rate_limit_short_circuits_network() {
-        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await
+        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false)
+            .await
             .with_streaming(StreamMode::Partial, 60_000);
         ch.last_draft_edit
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .insert("123".to_string(), std::time::Instant::now());
 
         let result = ch.update_draft("123", "42", "delta text").await;
@@ -2673,7 +2679,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_draft_utf8_truncation_is_safe_for_multibyte_text() {
-        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await
+        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false)
+            .await
             .with_streaming(StreamMode::Partial, 0);
         let long_emoji_text = "😀".repeat(TELEGRAM_MAX_MESSAGE_LENGTH + 20);
 
@@ -2687,7 +2694,8 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_draft_invalid_message_id_falls_back_to_chunk_send() {
-        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await
+        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false)
+            .await
             .with_streaming(StreamMode::Partial, 0);
         let long_text = "a".repeat(TELEGRAM_MAX_MESSAGE_LENGTH + 64);
 
@@ -2799,7 +2807,8 @@ mod tests {
 
     #[tokio::test]
     async fn telegram_user_denied_when_none_of_identities_match() {
-        let ch = TelegramChannel::new("t".into(), vec!["alice".into(), "987654321".into()], false).await;
+        let ch =
+            TelegramChannel::new("t".into(), vec!["alice".into(), "987654321".into()], false).await;
         assert!(!ch.is_any_user_allowed(["unknown", "123456789"]));
     }
 
@@ -3848,7 +3857,8 @@ mod tests {
         let ch = TelegramChannel::new("t".into(), vec!["*".into()], false).await;
         // Pre-populate transcription cache
         ch.voice_transcriptions
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .insert("100:42".to_string(), "Hello from voice".to_string());
         let msg = serde_json::json!({
             "chat": { "id": 100 },
@@ -3898,16 +3908,18 @@ mod tests {
         let mut tc = crate::config::TranscriptionConfig::default();
         tc.enabled = true;
 
-        let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false).await.with_transcription(tc);
+        let ch = TelegramChannel::new("token".into(), vec!["*".into()], false)
+            .await
+            .with_transcription(tc);
         assert!(ch.transcription.is_some());
     }
 
     #[tokio::test]
     async fn with_transcription_skips_when_disabled() {
         let tc = crate::config::TranscriptionConfig::default(); // enabled = false
-        let ch =
-            TelegramChannel::new("token".into(), vec!["*".into()], false).await.with_transcription(tc);
+        let ch = TelegramChannel::new("token".into(), vec!["*".into()], false)
+            .await
+            .with_transcription(tc);
         assert!(ch.transcription.is_none());
     }
 
@@ -3965,7 +3977,8 @@ mod tests {
         let message_id: i64 = 67;
         let cache_key = format!("{chat_id}:{message_id}");
         ch.voice_transcriptions
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .insert(cache_key, transcript.clone());
 
         // 5. Build reply message with voice + message_id + chat.id
@@ -4098,7 +4111,8 @@ mod tests {
 
     #[tokio::test]
     async fn with_workspace_dir_sets_field() {
-        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false).await
+        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false)
+            .await
             .with_workspace_dir(std::path::PathBuf::from("/tmp/test_workspace"));
         assert_eq!(
             ch.workspace_dir.as_deref(),

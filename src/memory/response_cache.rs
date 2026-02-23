@@ -7,10 +7,10 @@
 
 use anyhow::Result;
 use chrono::{Duration, Local};
-use tokio::sync::Mutex;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use tokio::sync::Mutex;
 
 /// Response cache backed by a dedicated SQLite database.
 ///
@@ -104,7 +104,13 @@ impl ResponseCache {
     }
 
     /// Store a response in the cache.
-    pub async fn put(&self, key: &str, model: &str, response: &str, token_count: u32) -> Result<()> {
+    pub async fn put(
+        &self,
+        key: &str,
+        model: &str,
+        response: &str,
+        token_count: u32,
+    ) -> Result<()> {
         let conn = self.conn.lock().await;
 
         let now = Local::now().to_rfc3339();
@@ -217,7 +223,8 @@ mod tests {
 
         cache
             .put(&key, "gpt-4", "Rust is a systems programming language.", 25)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         let result = cache.get(&key).await.unwrap();
         assert_eq!(
@@ -287,7 +294,8 @@ mod tests {
             let key = ResponseCache::cache_key("gpt-4", None, &format!("prompt {i}"));
             cache
                 .put(&key, "gpt-4", &format!("response {i}"), 10)
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
         let (count, _, _) = cache.stats().await.unwrap();
@@ -302,7 +310,8 @@ mod tests {
             let key = ResponseCache::cache_key("gpt-4", None, &format!("prompt {i}"));
             cache
                 .put(&key, "gpt-4", &format!("response {i}"), 10)
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
         let cleared = cache.clear().await.unwrap();
@@ -343,7 +352,8 @@ mod tests {
 
         cache
             .put(&key, "gpt-4", "はい、Rustは素晴らしい", 30)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         let result = cache.get(&key).await.unwrap();
         assert_eq!(result.as_deref(), Some("はい、Rustは素晴らしい"));
@@ -361,7 +371,8 @@ mod tests {
             let key = ResponseCache::cache_key("gpt-4", None, &format!("prompt {i}"));
             cache
                 .put(&key, "gpt-4", &format!("response {i}"), 10)
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
         // Access entry 0 to make it recently used

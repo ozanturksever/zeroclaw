@@ -637,7 +637,10 @@ impl Agent {
                         }
                     }
                 }
-                eprintln!("[STREAM] stream loop done, accumulated {} bytes", accumulated.len());
+                eprintln!(
+                    "[STREAM] stream loop done, accumulated {} bytes",
+                    accumulated.len()
+                );
                 // Build a ChatResponse from accumulated text so tool_dispatcher can parse
                 let synth_response = crate::providers::ChatResponse {
                     text: Some(accumulated),

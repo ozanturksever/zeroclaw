@@ -1,7 +1,7 @@
-use std::sync::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// How much autonomy the agent has

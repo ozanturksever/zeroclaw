@@ -49,7 +49,8 @@ impl Tool for MemoryForgetTool {
 
         if let Err(error) = self
             .security
-            .enforce_tool_operation(ToolOperation::Act, "memory_forget").await
+            .enforce_tool_operation(ToolOperation::Act, "memory_forget")
+            .await
         {
             return Ok(ToolResult {
                 success: false,

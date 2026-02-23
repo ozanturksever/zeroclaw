@@ -11,13 +11,13 @@ use crate::security::policy::ToolOperation;
 use crate::security::SecurityPolicy;
 use anyhow::Context;
 use async_trait::async_trait;
-use std::sync::RwLock;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 const COMPOSIO_API_BASE_V2: &str = "https://backend.composio.dev/api/v2";
 const COMPOSIO_API_BASE_V3: &str = "https://backend.composio.dev/api/v3";
@@ -170,13 +170,18 @@ impl ComposioTool {
     fn cache_connected_account(&self, app_name: &str, entity_id: &str, connected_account_id: &str) {
         let key = connected_account_cache_key(app_name, entity_id);
         self.recent_connected_accounts
-            .write().unwrap()
+            .write()
+            .unwrap()
             .insert(key, connected_account_id.to_string());
     }
 
     fn get_cached_connected_account(&self, app_name: &str, entity_id: &str) -> Option<String> {
         let key = connected_account_cache_key(app_name, entity_id);
-        self.recent_connected_accounts.read().unwrap().get(&key).cloned()
+        self.recent_connected_accounts
+            .read()
+            .unwrap()
+            .get(&key)
+            .cloned()
     }
 
     async fn resolve_connected_account_ref(

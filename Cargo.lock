@@ -1554,9 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "dink-sdk"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad0f6a7b38db4b495add57d91a069448b180a54c1fd02c63c2dad537f43660b8"
+version = "0.3.0"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -7685,7 +7683,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

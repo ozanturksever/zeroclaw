@@ -151,7 +151,6 @@ impl PairingGuard {
         Ok(None)
     }
 
-
     /// Check if a bearer token is valid (compares against stored hashes).
     pub async fn is_authenticated(&self, token: &str) -> bool {
         if !self.require_pairing {

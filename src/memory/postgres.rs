@@ -2,10 +2,10 @@ use super::traits::{Memory, MemoryCategory, MemoryEntry};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use tokio::sync::Mutex;
 use postgres::{Client, NoTls, Row};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 /// Maximum allowed connect timeout (seconds) to avoid unreasonable waits.

@@ -32,11 +32,11 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
@@ -1404,8 +1404,8 @@ mod tests {
     use axum::http::HeaderValue;
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
-    use tokio::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
 
     /// Generate a random hex secret at runtime to avoid hard-coded cryptographic values.
     fn generate_test_secret() -> String {

@@ -871,12 +871,8 @@ impl Provider for ReliableProvider {
                 None => model.to_string(),
             };
 
-            let stream = provider.stream_chat_with_history(
-                messages,
-                &current_model,
-                temperature,
-                options,
-            );
+            let stream =
+                provider.stream_chat_with_history(messages, &current_model, temperature, options);
 
             let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
 

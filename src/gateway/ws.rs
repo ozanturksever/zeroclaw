@@ -81,7 +81,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         // Process message with the LLM provider
         let provider_label = state
             .config
-            .lock().await
+            .lock()
+            .await
             .default_provider
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
