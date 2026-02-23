@@ -2,7 +2,7 @@
 
 Delta between this fork (`ozanturksever/zeroclaw`) and upstream (`zeroclaw-labs/zeroclaw`).
 
-Net effect: −14,816 / +5,417 lines. Upstream baseline: `c47fb22`.
+Net effect: +4,939 / −1,048 lines vs upstream. Upstream baseline: `359cfb4` (upstream/dev, 2026-02-23).
 
 ---
 
@@ -50,11 +50,11 @@ Plus `ZEROCLAW_CONFIG_BASE64` env support for containerized config injection.
 
 **Merge notes**: Touches `src/main.rs` (CLI routing) and `src/health/`. If upstream adds its own health system, negotiate.
 
-## 4. parking_lot → tokio::sync Migration ⚖️ NEGOTIATE
+## 4. parking_lot → tokio::sync Migration 🔒 KEEP
 
 Complete removal of the `parking_lot` crate. All synchronization primitives migrated to `tokio::sync::Mutex` / `std::sync` equivalents. Touches ~20+ files across agents, channels, providers, memory, security, cron, gateway, tools, etc.
 
-**Merge notes**: Wide blast radius. If upstream keeps `parking_lot`, adopting their version file-by-file and re-applying the migration is expensive. Check if upstream has independently moved away from `parking_lot`. If not, this is the biggest merge friction point.
+**Merge notes**: Migration preserved through the 359cfb4 merge. Upstream still uses parking_lot; fork adds .await to all new upstream code touching Mutex/RwLock. On future merges, check new upstream code for parking_lot usage and add .await as needed.
 
 ## 5. OpenRouter SSE Streaming ⚖️ NEGOTIATE
 
@@ -62,17 +62,17 @@ Per-token streaming via Server-Sent Events for the OpenRouter provider (`src/pro
 
 **Merge notes**: If upstream improves OpenRouter support independently, compare implementations. Fork version is production-tested.
 
-## 6. SOP System Removed 🔀 PREFER UPSTREAM
+## 6. SOP System ✅ RESOLVED
 
-The entire `src/sop/` module (~5,400 lines) and its 5 associated tools (`sop_advance`, `sop_approve`, `sop_execute`, `sop_list`, `sop_status`) were deleted. This was a structured-operations-procedure engine — cut as YAGNI for the fork.
+The `src/sop/` module and its 5 tools were restored from upstream per PREFER UPSTREAM policy. The fork does not use SOP but carries it to reduce merge friction.
 
-**Merge notes**: If upstream still ships SOP, let it come back on merge. The fork doesn't use it but doesn't need it gone either. Just don't wire it into OOSS paths.
+**Merge notes**: No action needed on future merges. SOP is upstream's concern.
 
-## 7. MQTT Channel Removed 🔀 PREFER UPSTREAM
+## 7. MQTT Channel ✅ RESOLVED
 
-`src/channels/mqtt.rs` deleted entirely.
+`src/channels/mqtt.rs` restored from upstream per PREFER UPSTREAM policy.
 
-**Merge notes**: Let upstream's version return if they maintain it. No fork dependency on its absence.
+**Merge notes**: No action needed on future merges.
 
 ## 8. Provider Simplifications ⚖️ NEGOTIATE
 
@@ -137,10 +137,10 @@ The entire `src/sop/` module (~5,400 lines) and its 5 associated tools (`sop_adv
 
 Before merging upstream:
 
-1. **Identify upstream baseline**: compare against the commit noted above (`c47fb22`).
+1. **Identify upstream baseline**: compare against the commit noted above (`359cfb4`).
 2. **KEEP items**: re-apply or conflict-resolve in favor of the fork.
 3. **PREFER UPSTREAM items**: accept upstream's version; drop fork-only changes.
 4. **NEGOTIATE items**: diff both versions, pick the better one, document the choice.
 5. **Test Dink integration** end-to-end after merge — it touches agent, channels, tools, config, and main.
-6. **Verify `parking_lot` state**: if upstream still uses it, decide whether to re-migrate or defer.
+6. **Verify `parking_lot` state**: upstream still uses it. Add .await to any new Mutex/RwLock usage from upstream.
 7. **Run full validation**: `cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test`.
