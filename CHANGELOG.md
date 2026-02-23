@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-02-23 (fork)
+
+### Fork Changes
+
+- 48504fe feat: health endpoint liveness wiring, heartbeat probe, health-check CLI
+- 57b2ffd fix: complete parking_lot → tokio::sync/std::sync migration
+- 76c2e72 refactor: eliminate parking_lot — full migration to tokio::sync::Mutex
+- ebfd16b refactor: dink-sdk 0.2.0, typed service handler, parking_lot → tokio mutex
+- 83e95ec fix: unwrap Dink SDK payload envelope in edge service handler
+- 8748491 fix: start health server independently of Dink connection
+- deddc54 feat: add health HTTP server for OOSS sandbox health checks
+- 54bc124 fix: suppress unused variable warning in agent channel loop
+- 253a588 feat: live GetStatus metrics + Shutdown handler
+- 5ba5e2a feat: per-token streaming via OpenRouter SSE
+- 539cc26 feat: StreamMessage RPC with real streaming, UpdateConfig live reload
+- 88a4ce7 feat: wire RecallMemory RPC to live memory backend, add memory_ref() getter
+- 3dbceb1 feat: Dink edge integration, ZEROCLAW_CONFIG_BASE64 env support, OpenRouter default
+- e326701 chore(deps): bump which from 7.0.3 to 8.0.0
+- d7d5ac3 chore(deps): bump rppal from 0.19.0 to 0.22.1
+- e5a6ab4 chore(deps): bump the rust-all group with 4 updates
+
+### Docs / CI Changes
+
+- 9fd9bc8 chore(deps): bump github/codeql-action in the actions-all group
+
+### Upstream Syncs
+
+- 1a65766 Merge remote-tracking branch 'upstream/dev'
+
+### Upstream Baseline
+
+- upstream/main: c47fb22
+
+
 ### Security
 - **Legacy XOR cipher migration**: The `enc:` prefix (XOR cipher) is now deprecated. 
   Secrets using this format will be automatically migrated to `enc2:` (ChaCha20-Poly1305 AEAD)

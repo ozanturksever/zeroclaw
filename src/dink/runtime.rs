@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dink_sdk::center::CenterClient;
-use dink_sdk::edge::{EdgeClient, ConnectionMonitor};
+use dink_sdk::edge::{ConnectionMonitor, EdgeClient};
 use dink_sdk::{CenterConfig, EdgeConfig, ServiceHandler};
 use tracing::{debug, info, warn};
 
@@ -131,17 +131,14 @@ impl DinkRuntime {
     /// This provides real-time NATS connection state tracking via the
     /// dink-sdk 0.3 event_callback mechanism.
     pub fn connection_monitor(&self) -> Option<&ConnectionMonitor> {
-        self.edge_client
-            .as_ref()
-            .map(|c| c.connection_monitor())
+        self.edge_client.as_ref().map(|c| c.connection_monitor())
     }
 
     /// Whether the edge connection is currently alive.
     ///
     /// Returns `true` if no edge client is configured (nothing to be dead).
     pub fn is_connected(&self) -> bool {
-        self.connection_monitor()
-            .map_or(true, |m| m.is_connected())
+        self.connection_monitor().map_or(true, |m| m.is_connected())
     }
 
     /// Expose a service handler on the edge client.

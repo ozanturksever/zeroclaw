@@ -89,7 +89,9 @@ pub async fn start_dink_listener(
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     if !mon.is_connected() {
                         liv.mark_dead();
-                        tracing::warn!("ConnectionMonitor: NATS disconnected → liveness marked dead");
+                        tracing::warn!(
+                            "ConnectionMonitor: NATS disconnected → liveness marked dead"
+                        );
                         break;
                     }
                 }
