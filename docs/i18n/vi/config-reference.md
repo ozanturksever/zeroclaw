@@ -25,6 +25,14 @@ Lệnh xuất schema:
 | `default_provider` | `openrouter` | ID hoặc bí danh provider |
 | `default_model` | `anthropic/claude-sonnet-4-6` | Model định tuyến qua provider đã chọn |
 | `default_temperature` | `0.7` | Nhiệt độ model |
+| `model_support_vision` | chưa đặt (`None`) | Ghi đè hỗ trợ vision cho provider/model đang dùng |
+
+Lưu ý:
+
+- `model_support_vision = true` bật vision (ví dụ Ollama chạy `llava`).
+- `model_support_vision = false` tắt vision.
+- Để trống giữ mặc định của provider.
+- Biến môi trường: `ZEROCLAW_MODEL_SUPPORT_VISION` hoặc `MODEL_SUPPORT_VISION` (giá trị: `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`).
 
 ## `[observability]`
 
@@ -127,6 +135,18 @@ Lưu ý:
 - `reasoning_enabled = false` tắt tường minh reasoning phía provider cho provider hỗ trợ (hiện tại `ollama`, qua trường `think: false`).
 - `reasoning_enabled = true` yêu cầu reasoning tường minh (`think: true` trên `ollama`).
 - Để trống giữ mặc định của provider.
+
+## `[provider]`
+
+| Khóa | Mặc định | Mục đích |
+|---|---|---|
+| `reasoning_level` | chưa đặt (`None`) | Ghi đè mức reasoning cho provider hỗ trợ mức (hiện tại OpenAI Codex `/responses`) |
+
+Lưu ý:
+
+- Giá trị hỗ trợ: `minimal`, `low`, `medium`, `high`, `xhigh` (không phân biệt hoa/thường).
+- Khi đặt, ghi đè `ZEROCLAW_CODEX_REASONING_EFFORT` cho OpenAI Codex.
+- Để trống sẽ dùng `ZEROCLAW_CODEX_REASONING_EFFORT` nếu có, nếu không mặc định `xhigh`.
 
 ## `[skills]`
 
@@ -258,6 +278,14 @@ Lưu ý:
 | `port` | `3000` | Cổng lắng nghe gateway |
 | `require_pairing` | `true` | Yêu cầu ghép nối trước khi xác thực bearer |
 | `allow_public_bind` | `false` | Chặn lộ public do vô ý |
+
+## `[gateway.node_control]` (thử nghiệm)
+
+| Khóa | Mặc định | Mục đích |
+|---|---|---|
+| `enabled` | `false` | Bật endpoint scaffold node-control (`POST /api/node-control`) |
+| `auth_token` | `null` | Shared token bổ sung, kiểm qua header `X-Node-Control-Token` |
+| `allowed_node_ids` | `[]` | Allowlist cho `node.describe`/`node.invoke` (`[]` = chấp nhận mọi node) |
 
 ## `[autonomy]`
 

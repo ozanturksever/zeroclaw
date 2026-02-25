@@ -1,17 +1,16 @@
 use crate::multimodal;
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
-    Provider, ProviderCapabilities, StreamChunk, StreamError, StreamOptions, StreamResult,
-    TokenUsage, ToolCall as ProviderToolCall,
+    Provider, ProviderCapabilities, TokenUsage, ToolCall as ProviderToolCall,
 };
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
-use futures_util::stream::{self, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 pub struct OpenRouterProvider {
     credential: Option<String>,
+    max_tokens_override: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -20,7 +19,7 @@ struct ChatRequest {
     messages: Vec<Message>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
+    max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +67,8 @@ struct NativeChatRequest {
     model: String,
     messages: Vec<NativeMessage>,
     temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<NativeToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,8 +152,13 @@ struct NativeResponseMessage {
 
 impl OpenRouterProvider {
     pub fn new(credential: Option<&str>) -> Self {
+        Self::new_with_max_tokens(credential, None)
+    }
+
+    pub fn new_with_max_tokens(credential: Option<&str>, max_tokens_override: Option<u32>) -> Self {
         Self {
             credential: credential.map(ToString::to_string),
+            max_tokens_override: max_tokens_override.filter(|value| *value > 0),
         }
     }
 
@@ -355,7 +361,7 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages,
             temperature,
-            stream: None,
+            max_tokens: self.max_tokens_override,
         };
 
         let response = self
@@ -406,7 +412,7 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages: api_messages,
             temperature,
-            stream: None,
+            max_tokens: self.max_tokens_override,
         };
 
         let response = self
@@ -453,6 +459,7 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
             temperature,
+            max_tokens: self.max_tokens_override,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
         };
@@ -547,6 +554,7 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages: native_messages,
             temperature,
+            max_tokens: self.max_tokens_override,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
         };
@@ -582,138 +590,6 @@ impl Provider for OpenRouterProvider {
         let mut result = Self::parse_native_response(message);
         result.usage = usage;
         Ok(result)
-    }
-
-    fn supports_streaming(&self) -> bool {
-        true
-    }
-
-    fn stream_chat_with_history(
-        &self,
-        messages: &[ChatMessage],
-        model: &str,
-        temperature: f64,
-        _options: StreamOptions,
-    ) -> futures_util::stream::BoxStream<'static, StreamResult<StreamChunk>> {
-        let credential = match self.credential.as_ref() {
-            Some(value) => value.clone(),
-            None => {
-                return stream::once(async {
-                    Err(StreamError::Provider(
-                        "OpenRouter API key not set".to_string(),
-                    ))
-                })
-                .boxed();
-            }
-        };
-
-        let api_messages: Vec<Message> = messages
-            .iter()
-            .map(|m| Message {
-                role: m.role.clone(),
-                content: MessageContent::Text(m.content.clone()),
-            })
-            .collect();
-
-        let request = ChatRequest {
-            model: model.to_string(),
-            messages: api_messages,
-            temperature,
-            stream: Some(true),
-        };
-
-        let client = self.http_client();
-        let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
-
-        tokio::spawn(async move {
-            let response = match client
-                .post("https://openrouter.ai/api/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", credential))
-                .header("Accept", "text/event-stream")
-                .json(&request)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.send(Err(StreamError::Http(e))).await;
-                    return;
-                }
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let error = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| format!("HTTP {}", status));
-                let _ = tx
-                    .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
-                    .await;
-                return;
-            }
-
-            // Parse SSE stream
-            let mut bytes_stream = response.bytes_stream();
-            let mut buffer = String::new();
-
-            while let Some(item) = bytes_stream.next().await {
-                match item {
-                    Ok(bytes) => {
-                        let text = match String::from_utf8(bytes.to_vec()) {
-                            Ok(t) => t,
-                            Err(_) => continue,
-                        };
-                        buffer.push_str(&text);
-
-                        while let Some(pos) = buffer.find('\n') {
-                            let line = buffer[..=pos].to_string();
-                            buffer = buffer[pos + 1..].to_string();
-                            let line = line.trim();
-
-                            if line.is_empty() || line.starts_with(':') {
-                                continue;
-                            }
-
-                            if let Some(data) = line.strip_prefix("data:") {
-                                let data = data.trim();
-                                if data == "[DONE]" {
-                                    continue;
-                                }
-
-                                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(delta) = chunk
-                                        .get("choices")
-                                        .and_then(|c| c.get(0))
-                                        .and_then(|c| c.get("delta"))
-                                        .and_then(|d| d.get("content"))
-                                        .and_then(|c| c.as_str())
-                                    {
-                                        if !delta.is_empty() {
-                                            if tx.send(Ok(StreamChunk::delta(delta))).await.is_err()
-                                            {
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(StreamError::Http(e))).await;
-                        break;
-                    }
-                }
-            }
-
-            let _ = tx.send(Ok(StreamChunk::final_chunk())).await;
-        });
-
-        stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|chunk| (chunk, rx))
-        })
-        .boxed()
     }
 }
 
@@ -800,7 +676,7 @@ mod tests {
                 },
             ],
             temperature: 0.5,
-            stream: None,
+            max_tokens: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -834,13 +710,28 @@ mod tests {
                 })
                 .collect(),
             temperature: 0.0,
-            stream: None,
+            max_tokens: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"role\":\"assistant\""));
         assert!(json.contains("\"role\":\"user\""));
         assert!(json.contains("google/gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn chat_request_serializes_max_tokens_when_present() {
+        let request = ChatRequest {
+            model: "openai/gpt-4o".into(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: MessageContent::Text("hello".into()),
+            }],
+            temperature: 0.2,
+            max_tokens: Some(2048),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"max_tokens\":2048"));
     }
 
     #[test]

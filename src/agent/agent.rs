@@ -3,7 +3,8 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::memory_loader::{DefaultMemoryLoader, MemoryLoader};
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
-use crate::config::Config;
+use crate::agent::research;
+use crate::config::{Config, ResearchPhaseConfig};
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::providers::{self, ChatMessage, ChatRequest, ConversationMessage, Provider};
@@ -37,15 +38,7 @@ pub struct Agent {
     classification_config: crate::config::QueryClassificationConfig,
     available_hints: Vec<String>,
     route_model_by_hint: HashMap<String, String>,
-}
-
-/// Runtime configuration changes that can be applied without restart.
-#[derive(Debug, Clone, Default)]
-pub struct RuntimeConfigUpdate {
-    pub model: Option<String>,
-    pub temperature: Option<f64>,
-    pub max_tool_iterations: Option<usize>,
-    pub auto_save: Option<bool>,
+    research_config: ResearchPhaseConfig,
 }
 
 pub struct AgentBuilder {
@@ -67,6 +60,7 @@ pub struct AgentBuilder {
     classification_config: Option<crate::config::QueryClassificationConfig>,
     available_hints: Option<Vec<String>>,
     route_model_by_hint: Option<HashMap<String, String>>,
+    research_config: Option<ResearchPhaseConfig>,
 }
 
 impl AgentBuilder {
@@ -90,6 +84,7 @@ impl AgentBuilder {
             classification_config: None,
             available_hints: None,
             route_model_by_hint: None,
+            research_config: None,
         }
     }
 
@@ -189,6 +184,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn research_config(mut self, research_config: ResearchPhaseConfig) -> Self {
+        self.research_config = Some(research_config);
+        self
+    }
+
     pub fn build(self) -> Result<Agent> {
         let tools = self
             .tools
@@ -232,6 +232,7 @@ impl AgentBuilder {
             classification_config: self.classification_config.unwrap_or_default(),
             available_hints: self.available_hints.unwrap_or_default(),
             route_model_by_hint: self.route_model_by_hint.unwrap_or_default(),
+            research_config: self.research_config.unwrap_or_default(),
         })
     }
 }
@@ -243,30 +244,6 @@ impl Agent {
 
     pub fn history(&self) -> &[ConversationMessage] {
         &self.history
-    }
-
-    pub fn memory_ref(&self) -> &Arc<dyn Memory> {
-        &self.memory
-    }
-
-    /// Apply runtime configuration changes without restarting the agent.
-    pub fn apply_config_update(&mut self, update: &RuntimeConfigUpdate) {
-        if let Some(ref model) = update.model {
-            tracing::info!(old = %self.model_name, new = %model, "Updating model");
-            self.model_name = model.clone();
-        }
-        if let Some(temp) = update.temperature {
-            tracing::info!(old = %self.temperature, new = %temp, "Updating temperature");
-            self.temperature = temp;
-        }
-        if let Some(max_iter) = update.max_tool_iterations {
-            tracing::info!(old = %self.config.max_tool_iterations, new = %max_iter, "Updating max_tool_iterations");
-            self.config.max_tool_iterations = max_iter;
-        }
-        if let Some(auto_save) = update.auto_save {
-            tracing::info!(old = %self.auto_save, new = %auto_save, "Updating auto_save");
-            self.auto_save = auto_save;
-        }
     }
 
     pub fn clear_history(&mut self) {
@@ -311,6 +288,7 @@ impl Agent {
             composio_entity_id,
             &config.browser,
             &config.http_request,
+            &config.web_fetch,
             &config.workspace_dir,
             &config.agents,
             config.api_key.as_deref(),
@@ -374,6 +352,7 @@ impl Agent {
             ))
             .skills_prompt_mode(config.skills.prompt_injection_mode)
             .auto_save(config.memory.auto_save)
+            .research_config(config.research.clone())
             .build()
     }
 
@@ -518,11 +497,60 @@ impl Agent {
             .await
             .unwrap_or_default();
 
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = if context.is_empty() {
-            format!("[{now}] {user_message}")
+        // ── Research Phase ──────────────────────────────────────────────
+        // If enabled and triggered, run a focused research turn to gather
+        // information before the main response.
+        let research_context = if research::should_trigger(&self.research_config, user_message) {
+            if self.research_config.show_progress {
+                println!("[Research] Gathering information...");
+            }
+
+            match research::run_research_phase(
+                &self.research_config,
+                self.provider.as_ref(),
+                &self.tools,
+                user_message,
+                &self.model_name,
+                self.temperature,
+                self.observer.clone(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    if self.research_config.show_progress {
+                        println!(
+                            "[Research] Complete: {} tool calls, {} chars context",
+                            result.tool_call_count,
+                            result.context.len()
+                        );
+                        for summary in &result.tool_summaries {
+                            println!("  - {}: {}", summary.tool_name, summary.result_preview);
+                        }
+                    }
+                    if result.context.is_empty() {
+                        None
+                    } else {
+                        Some(result.context)
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Research phase failed: {}", e);
+                    None
+                }
+            }
         } else {
-            format!("{context}[{now}] {user_message}")
+            None
+        };
+
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+        let stamped_user_message = format!("[{now}] {user_message}");
+        let enriched = match (&context, &research_context) {
+            (c, Some(r)) if !c.is_empty() => {
+                format!("{c}\n\n{r}\n\n{stamped_user_message}")
+            }
+            (_, Some(r)) => format!("{r}\n\n{stamped_user_message}"),
+            (c, None) if !c.is_empty() => format!("{c}{stamped_user_message}"),
+            _ => stamped_user_message,
         };
 
         self.history
@@ -596,182 +624,6 @@ impl Agent {
         )
     }
 
-    /// Like [`turn`] but emits streaming delta events through the provided sender.
-    ///
-    /// Events are JSON-serializable maps with `event_type` and `data` fields:
-    /// - `{"event_type": "delta", "data": {"text": "..."}}` — incremental text
-    /// - `{"event_type": "tool_call", "data": {"name": "...", "args": ...}}` — tool invocation
-    /// - `{"event_type": "tool_result", "data": {"name": "...", "output": "..."}}` — tool result
-    /// - `{"event_type": "done", "data": {"response": "...", "iterations": N}}` — final
-    pub async fn turn_streaming(
-        &mut self,
-        user_message: &str,
-        delta_tx: tokio::sync::mpsc::Sender<serde_json::Value>,
-    ) -> Result<String> {
-        if self.history.is_empty() {
-            let system_prompt = self.build_system_prompt()?;
-            self.history
-                .push(ConversationMessage::Chat(ChatMessage::system(
-                    system_prompt,
-                )));
-        }
-        if self.auto_save {
-            let _ = self
-                .memory
-                .store("user_msg", user_message, MemoryCategory::Conversation, None)
-                .await;
-        }
-        let context = self
-            .memory_loader
-            .load_context(self.memory.as_ref(), user_message)
-            .await
-            .unwrap_or_default();
-        let enriched = if context.is_empty() {
-            user_message.to_string()
-        } else {
-            format!("{context}{user_message}")
-        };
-        self.history
-            .push(ConversationMessage::Chat(ChatMessage::user(enriched)));
-        let effective_model = self.classify_model(user_message);
-        let mut iteration = 0;
-        for _ in 0..self.config.max_tool_iterations {
-            iteration += 1;
-            let messages = self.tool_dispatcher.to_provider_messages(&self.history);
-            // Use streaming provider path if supported, otherwise non-streaming
-            let (response_text, tool_calls_from_response) = if self.provider.supports_streaming() {
-                use futures_util::StreamExt;
-                let msgs_clone: Vec<ChatMessage> = messages.clone();
-                let mut stream = self.provider.stream_chat_with_history(
-                    &msgs_clone,
-                    &effective_model,
-                    self.temperature,
-                    crate::providers::traits::StreamOptions::new(true),
-                );
-                let mut accumulated = String::new();
-                while let Some(chunk_result) = stream.next().await {
-                    match chunk_result {
-                        Ok(chunk) => {
-                            if !chunk.delta.is_empty() {
-                                accumulated.push_str(&chunk.delta);
-                                let _ = delta_tx
-                                    .send(serde_json::json!({
-                                        "event_type": "delta",
-                                        "data": { "text": chunk.delta }
-                                    }))
-                                    .await;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Stream chunk error: {e}");
-                            break;
-                        }
-                    }
-                }
-                eprintln!(
-                    "[STREAM] stream loop done, accumulated {} bytes",
-                    accumulated.len()
-                );
-                // Build a ChatResponse from accumulated text so tool_dispatcher can parse
-                let synth_response = crate::providers::ChatResponse {
-                    text: Some(accumulated),
-                    tool_calls: vec![],
-                    usage: None,
-                    reasoning_content: None,
-                };
-                let (text, calls) = self.tool_dispatcher.parse_response(&synth_response);
-                (text, calls)
-            } else {
-                let response = self
-                    .provider
-                    .chat(
-                        ChatRequest {
-                            messages: &messages,
-                            tools: if self.tool_dispatcher.should_send_tool_specs() {
-                                Some(&self.tool_specs)
-                            } else {
-                                None
-                            },
-                        },
-                        &effective_model,
-                        self.temperature,
-                    )
-                    .await?;
-                let (text, calls) = self.tool_dispatcher.parse_response(&response);
-                // Non-streaming: emit whole text as single delta
-                if calls.is_empty() && !text.is_empty() {
-                    let _ = delta_tx
-                        .send(serde_json::json!({
-                            "event_type": "delta",
-                            "data": { "text": text }
-                        }))
-                        .await;
-                }
-                (text, calls)
-            };
-
-            // No tool calls = final response
-            if tool_calls_from_response.is_empty() {
-                let final_text = response_text;
-                self.history
-                    .push(ConversationMessage::Chat(ChatMessage::assistant(
-                        final_text.clone(),
-                    )));
-                self.trim_history();
-                let _ = delta_tx
-                    .send(serde_json::json!({
-                        "event_type": "done",
-                        "data": { "response": final_text, "iterations": iteration }
-                    }))
-                    .await;
-                return Ok(final_text);
-            }
-
-            // Tool calls present — emit events, execute, loop
-            if !response_text.is_empty() {
-                self.history
-                    .push(ConversationMessage::Chat(ChatMessage::assistant(
-                        response_text.clone(),
-                    )));
-            }
-
-            // Record tool call attempt in history (use empty ChatResponse tool_calls
-            // since XML dispatchers embed calls in text).
-            self.history.push(ConversationMessage::AssistantToolCalls {
-                text: Some(response_text),
-                tool_calls: vec![],
-                reasoning_content: None,
-            });
-
-            for call in &tool_calls_from_response {
-                let _ = delta_tx
-                    .send(serde_json::json!({
-                        "event_type": "tool_call",
-                        "data": { "name": call.name, "args": call.arguments }
-                    }))
-                    .await;
-            }
-
-            let results = self.execute_tools(&tool_calls_from_response).await;
-            for result in &results {
-                let _ = delta_tx
-                    .send(serde_json::json!({
-                        "event_type": "tool_result",
-                        "data": { "name": result.name, "output": result.output, "success": result.success }
-                    }))
-                    .await;
-            }
-
-            let formatted = self.tool_dispatcher.format_results(&results);
-            self.history.push(formatted);
-            self.trim_history();
-        }
-        anyhow::bail!(
-            "Agent exceeded maximum tool iterations ({})",
-            self.config.max_tool_iterations
-        )
-    }
-
     pub async fn run_single(&mut self, message: &str) -> Result<String> {
         self.turn(message).await
     }
@@ -790,7 +642,8 @@ impl Agent {
         while let Some(msg) = rx.recv().await {
             let response = match self.turn(&msg.content).await {
                 Ok(resp) => resp,
-                Err(_e) => {
+                Err(e) => {
+                    eprintln!("\nError: {e}\n");
                     continue;
                 }
             };
@@ -860,8 +713,8 @@ pub async fn run(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use parking_lot::Mutex;
     use std::collections::HashMap;
-    use tokio::sync::Mutex;
 
     struct MockProvider {
         responses: Mutex<Vec<crate::providers::ChatResponse>>,
@@ -885,7 +738,7 @@ mod tests {
             _model: &str,
             _temperature: f64,
         ) -> Result<crate::providers::ChatResponse> {
-            let mut guard = self.responses.lock().await;
+            let mut guard = self.responses.lock();
             if guard.is_empty() {
                 return Ok(crate::providers::ChatResponse {
                     text: Some("done".into()),
@@ -921,8 +774,8 @@ mod tests {
             model: &str,
             _temperature: f64,
         ) -> Result<crate::providers::ChatResponse> {
-            self.seen_models.lock().await.push(model.to_string());
-            let mut guard = self.responses.lock().await;
+            self.seen_models.lock().push(model.to_string());
+            let mut guard = self.responses.lock();
             if guard.is_empty() {
                 return Ok(crate::providers::ChatResponse {
                     text: Some("done".into()),
@@ -1096,7 +949,7 @@ mod tests {
 
         let response = agent.turn("quick summary please").await.unwrap();
         assert_eq!(response, "classified");
-        let seen = seen_models.lock().await;
+        let seen = seen_models.lock();
         assert_eq!(seen.as_slice(), &["hint:fast".to_string()]);
     }
 }

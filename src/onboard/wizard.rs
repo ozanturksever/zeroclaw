@@ -1,12 +1,12 @@
 use crate::config::schema::{
     default_nostr_relays, DingTalkConfig, IrcConfig, LarkReceiveMode, LinqConfig,
-    NextcloudTalkConfig, NostrConfig, QQConfig, SignalConfig, StreamMode, WhatsAppConfig,
+    NextcloudTalkConfig, NostrConfig, QQConfig, QQReceiveMode, SignalConfig, StreamMode,
+    WhatsAppConfig,
 };
 use crate::config::{
     AutonomyConfig, BrowserConfig, ChannelsConfig, ComposioConfig, Config, DiscordConfig,
-    FeishuConfig, HeartbeatConfig, IMessageConfig, LarkConfig, MatrixConfig, MemoryConfig,
-    ObservabilityConfig, RuntimeConfig, SecretsConfig, SlackConfig, StorageConfig, TelegramConfig,
-    WebhookConfig,
+    HeartbeatConfig, IMessageConfig, LarkConfig, MatrixConfig, MemoryConfig, ObservabilityConfig,
+    RuntimeConfig, SecretsConfig, SlackConfig, StorageConfig, TelegramConfig, WebhookConfig,
 };
 use crate::hardware::{self, HardwareConfig};
 use crate::memory::{
@@ -22,7 +22,7 @@ use console::style;
 use dialoguer::{Confirm, Input, Select};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -134,12 +134,16 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         },
         api_url: provider_api_url,
         default_provider: Some(provider),
+        provider_api: None,
         default_model: Some(model),
+        model_providers: std::collections::HashMap::new(),
+        provider: crate::config::ProviderConfig::default(),
         default_temperature: 0.7,
         observability: ObservabilityConfig::default(),
         autonomy: AutonomyConfig::default(),
         security: crate::config::SecurityConfig::default(),
         runtime: RuntimeConfig::default(),
+        research: crate::config::ResearchPhaseConfig::default(),
         reliability: crate::config::ReliabilityConfig::default(),
         scheduler: crate::config::schema::SchedulerConfig::default(),
         agent: crate::config::schema::AgentConfig::default(),
@@ -158,6 +162,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         browser: BrowserConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
         multimodal: crate::config::MultimodalConfig::default(),
+        web_fetch: crate::config::WebFetchConfig::default(),
         web_search: crate::config::WebSearchConfig::default(),
         proxy: crate::config::ProxyConfig::default(),
         identity: crate::config::IdentityConfig::default(),
@@ -168,8 +173,8 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         hardware: hardware_config,
         query_classification: crate::config::QueryClassificationConfig::default(),
         transcription: crate::config::TranscriptionConfig::default(),
-        dink: crate::config::DinkConfig::default(),
-        instance_identity: crate::config::OossInstanceIdentity::default(),
+        agents_ipc: crate::config::AgentsIpcConfig::default(),
+        model_support_vision: None,
     };
 
     println!(
@@ -389,6 +394,7 @@ fn memory_config_defaults_for_backend(backend: &str) -> MemoryConfig {
         snapshot_on_hygiene: false,
         auto_hydrate: true,
         sqlite_open_timeout_secs: None,
+        qdrant: crate::config::QdrantConfig::default(),
     }
 }
 
@@ -484,12 +490,16 @@ async fn run_quick_setup_with_home(
         }),
         api_url: None,
         default_provider: Some(provider_name.clone()),
+        provider_api: None,
         default_model: Some(model.clone()),
+        model_providers: std::collections::HashMap::new(),
+        provider: crate::config::ProviderConfig::default(),
         default_temperature: 0.7,
         observability: ObservabilityConfig::default(),
         autonomy: AutonomyConfig::default(),
         security: crate::config::SecurityConfig::default(),
         runtime: RuntimeConfig::default(),
+        research: crate::config::ResearchPhaseConfig::default(),
         reliability: crate::config::ReliabilityConfig::default(),
         scheduler: crate::config::schema::SchedulerConfig::default(),
         agent: crate::config::schema::AgentConfig::default(),
@@ -508,6 +518,7 @@ async fn run_quick_setup_with_home(
         browser: BrowserConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
         multimodal: crate::config::MultimodalConfig::default(),
+        web_fetch: crate::config::WebFetchConfig::default(),
         web_search: crate::config::WebSearchConfig::default(),
         proxy: crate::config::ProxyConfig::default(),
         identity: crate::config::IdentityConfig::default(),
@@ -518,8 +529,8 @@ async fn run_quick_setup_with_home(
         hardware: crate::config::HardwareConfig::default(),
         query_classification: crate::config::QueryClassificationConfig::default(),
         transcription: crate::config::TranscriptionConfig::default(),
-        dink: crate::config::DinkConfig::default(),
-        instance_identity: crate::config::OossInstanceIdentity::default(),
+        agents_ipc: crate::config::AgentsIpcConfig::default(),
+        model_support_vision: None,
     };
 
     config.save().await?;
@@ -604,10 +615,32 @@ async fn run_quick_setup_with_home(
     println!();
     println!("  {}", style("Next steps:").white().bold());
     if credential_override.is_none() {
-        println!("    1. Set your API key:  export OPENROUTER_API_KEY=\"sk-...\"");
-        println!("    2. Or edit:           ~/.zeroclaw/config.toml");
-        println!("    3. Chat:              zeroclaw agent -m \"Hello!\"");
-        println!("    4. Gateway:           zeroclaw gateway");
+        if provider_supports_keyless_local_usage(&provider_name) {
+            println!("    1. Chat:     zeroclaw agent -m \"Hello!\"");
+            println!("    2. Gateway:  zeroclaw gateway");
+            println!("    3. Status:   zeroclaw status");
+        } else if provider_supports_device_flow(&provider_name) {
+            if canonical_provider_name(&provider_name) == "copilot" {
+                println!("    1. Chat:              zeroclaw agent -m \"Hello!\"");
+                println!("       (device / OAuth auth will prompt on first run)");
+                println!("    2. Gateway:           zeroclaw gateway");
+                println!("    3. Status:            zeroclaw status");
+            } else {
+                println!(
+                    "    1. Login:             zeroclaw auth login --provider {}",
+                    provider_name
+                );
+                println!("    2. Chat:              zeroclaw agent -m \"Hello!\"");
+                println!("    3. Gateway:           zeroclaw gateway");
+                println!("    4. Status:            zeroclaw status");
+            }
+        } else {
+            let env_var = provider_env_var(&provider_name);
+            println!("    1. Set your API key:  export {env_var}=\"sk-...\"");
+            println!("    2. Or edit:           ~/.zeroclaw/config.toml");
+            println!("    3. Chat:              zeroclaw agent -m \"Hello!\"");
+            println!("    4. Gateway:           zeroclaw gateway");
+        }
     } else {
         println!("    1. Chat:     zeroclaw agent -m \"Hello!\"");
         println!("    2. Gateway:  zeroclaw gateway");
@@ -631,6 +664,8 @@ fn canonical_provider_name(provider_name: &str) -> &str {
         "grok" => "xai",
         "together" => "together-ai",
         "google" | "google-gemini" => "gemini",
+        "github-copilot" => "copilot",
+        "openai_codex" | "codex" => "openai-codex",
         "kimi_coding" | "kimi_for_coding" => "kimi-code",
         "nvidia-nim" | "build.nvidia.com" => "nvidia",
         "aws-bedrock" => "bedrock",
@@ -675,9 +710,11 @@ fn default_model_for_provider(provider: &str) -> String {
         "xai" => "grok-4-1-fast-reasoning".into(),
         "perplexity" => "sonar-pro".into(),
         "fireworks" => "accounts/fireworks/models/llama-v3p3-70b-instruct".into(),
+        "novita" => "minimax/minimax-m2.5".into(),
         "together-ai" => "meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),
         "cohere" => "command-a-03-2025".into(),
         "moonshot" => "kimi-k2.5".into(),
+        "hunyuan" => "hunyuan-t1-latest".into(),
         "glm" | "zai" => "glm-5".into(),
         "minimax" => "MiniMax-M2.5".into(),
         "qwen" => "qwen-plus".into(),
@@ -828,6 +865,20 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
                 "DeepSeek Reasoner (mapped to V3.2 thinking)".to_string(),
             ),
         ],
+        "hunyuan" => vec![
+            (
+                "hunyuan-t1-latest".to_string(),
+                "Hunyuan T1 (deep reasoning, latest)".to_string(),
+            ),
+            (
+                "hunyuan-turbo-latest".to_string(),
+                "Hunyuan Turbo (fast, general purpose)".to_string(),
+            ),
+            (
+                "hunyuan-pro".to_string(),
+                "Hunyuan Pro (high quality)".to_string(),
+            ),
+        ],
         "xai" => vec![
             (
                 "grok-4-1-fast-reasoning".to_string(),
@@ -868,6 +919,10 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
                 "Mixtral 8x22B".to_string(),
             ),
         ],
+        "novita" => vec![(
+            "minimax/minimax-m2.5".to_string(),
+            "MiniMax M2.5".to_string(),
+        )],
         "together-ai" => vec![
             (
                 "meta-llama/Llama-3.3-70B-Instruct-Turbo".to_string(),
@@ -1101,9 +1156,14 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
 }
 
 fn supports_live_model_fetch(provider_name: &str) -> bool {
+    if provider_name.trim().starts_with("custom:") {
+        return true;
+    }
+
     matches!(
         canonical_provider_name(provider_name),
         "openrouter"
+            | "openai-codex"
             | "openai"
             | "anthropic"
             | "groq"
@@ -1120,6 +1180,7 @@ fn supports_live_model_fetch(provider_name: &str) -> bool {
             | "astrai"
             | "venice"
             | "fireworks"
+            | "novita"
             | "cohere"
             | "moonshot"
             | "glm"
@@ -1137,7 +1198,7 @@ fn models_endpoint_for_provider(provider_name: &str) -> Option<&'static str> {
         "glm-cn" | "bigmodel" => Some("https://open.bigmodel.cn/api/paas/v4/models"),
         "zai-cn" | "z.ai-cn" => Some("https://open.bigmodel.cn/api/coding/paas/v4/models"),
         _ => match canonical_provider_name(provider_name) {
-            "openai" => Some("https://api.openai.com/v1/models"),
+            "openai-codex" | "openai" => Some("https://api.openai.com/v1/models"),
             "venice" => Some("https://api.venice.ai/api/v1/models"),
             "groq" => Some("https://api.groq.com/openai/v1/models"),
             "mistral" => Some("https://api.mistral.ai/v1/models"),
@@ -1145,6 +1206,7 @@ fn models_endpoint_for_provider(provider_name: &str) -> Option<&'static str> {
             "xai" => Some("https://api.x.ai/v1/models"),
             "together-ai" => Some("https://api.together.xyz/v1/models"),
             "fireworks" => Some("https://api.fireworks.ai/inference/v1/models"),
+            "novita" => Some("https://api.novita.ai/openai/v1/models"),
             "cohere" => Some("https://api.cohere.com/compatibility/v1/models"),
             "moonshot" => Some("https://api.moonshot.ai/v1/models"),
             "glm" => Some("https://api.z.ai/api/paas/v4/models"),
@@ -1170,14 +1232,16 @@ fn build_model_fetch_client() -> Result<reqwest::blocking::Client> {
 }
 
 fn normalize_model_ids(ids: Vec<String>) -> Vec<String> {
-    let mut unique = BTreeSet::new();
+    let mut unique = BTreeMap::new();
     for id in ids {
         let trimmed = id.trim();
         if !trimmed.is_empty() {
-            unique.insert(trimmed.to_string());
+            unique
+                .entry(trimmed.to_ascii_lowercase())
+                .or_insert_with(|| trimmed.to_string());
         }
     }
-    unique.into_iter().collect()
+    unique.into_values().collect()
 }
 
 fn parse_openai_compatible_model_ids(payload: &Value) -> Vec<String> {
@@ -1386,10 +1450,34 @@ fn resolve_live_models_endpoint(
     provider_name: &str,
     provider_api_url: Option<&str>,
 ) -> Option<String> {
+    if let Some(raw_base) = provider_name.strip_prefix("custom:") {
+        let normalized = raw_base.trim().trim_end_matches('/');
+        if normalized.is_empty() {
+            return None;
+        }
+        if normalized.ends_with("/models") {
+            return Some(normalized.to_string());
+        }
+        return Some(format!("{normalized}/models"));
+    }
+
     if matches!(
         canonical_provider_name(provider_name),
         "llamacpp" | "sglang" | "vllm" | "osaurus"
     ) {
+        if let Some(url) = provider_api_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            let normalized = url.trim_end_matches('/');
+            if normalized.ends_with("/models") {
+                return Some(normalized.to_string());
+            }
+            return Some(format!("{normalized}/models"));
+        }
+    }
+
+    if canonical_provider_name(provider_name) == "openai-codex" {
         if let Some(url) = provider_api_url
             .map(str::trim)
             .filter(|url| !url.is_empty())
@@ -1833,6 +1921,64 @@ pub async fn run_models_status(config: &Config) -> Result<()> {
     Ok(())
 }
 
+pub async fn cached_model_catalog_stats(
+    config: &Config,
+    provider_name: &str,
+) -> Result<Option<(usize, u64)>> {
+    let Some(cached) =
+        load_any_cached_models_for_provider(&config.workspace_dir, provider_name).await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((cached.models.len(), cached.age_secs)))
+}
+
+pub async fn run_models_refresh_all(config: &Config, force: bool) -> Result<()> {
+    let mut targets: Vec<String> = crate::providers::list_providers()
+        .into_iter()
+        .map(|provider| provider.name.to_string())
+        .filter(|name| supports_live_model_fetch(name))
+        .collect();
+
+    targets.sort();
+    targets.dedup();
+
+    if targets.is_empty() {
+        anyhow::bail!("No providers support live model discovery");
+    }
+
+    println!(
+        "Refreshing model catalogs for {} providers (force: {})",
+        targets.len(),
+        if force { "yes" } else { "no" }
+    );
+    println!();
+
+    let mut ok_count = 0usize;
+    let mut fail_count = 0usize;
+
+    for provider_name in &targets {
+        println!("== {} ==", provider_name);
+        match run_models_refresh(config, Some(provider_name), force).await {
+            Ok(()) => {
+                ok_count += 1;
+            }
+            Err(error) => {
+                fail_count += 1;
+                println!("  failed: {error}");
+            }
+        }
+        println!();
+    }
+
+    println!("Summary: {} succeeded, {} failed", ok_count, fail_count);
+
+    if ok_count == 0 {
+        anyhow::bail!("Model refresh failed for all providers")
+    }
+    Ok(())
+}
+
 // ── Step helpers ─────────────────────────────────────────────────
 
 fn print_step(current: u8, total: u8, title: &str) {
@@ -1884,7 +2030,7 @@ fn resolve_interactive_onboarding_mode(
             "  Existing config found at {}. Select setup mode",
             config_path.display()
         ))
-        .items(&options)
+        .items(options)
         .default(1)
         .interact()?;
 
@@ -2031,6 +2177,7 @@ async fn setup_provider(workspace_dir: &Path) -> Result<(String, String, String,
         1 => vec![
             ("groq", "Groq — ultra-fast LPU inference"),
             ("fireworks", "Fireworks AI — fast open-source inference"),
+            ("novita", "Novita AI — affordable open-source inference"),
             ("together-ai", "Together AI — open-source model hosting"),
             ("nvidia", "NVIDIA NIM — DeepSeek, Llama, & more"),
         ],
@@ -2067,6 +2214,7 @@ async fn setup_provider(workspace_dir: &Path) -> Result<(String, String, String,
             ("qwen", "Qwen — DashScope China endpoint"),
             ("qwen-intl", "Qwen — DashScope international endpoint"),
             ("qwen-us", "Qwen — DashScope US endpoint"),
+            ("hunyuan", "Hunyuan — Tencent large models (T1, Turbo, Pro)"),
             ("qianfan", "Qianfan — Baidu AI models (China endpoint)"),
             ("zai", "Z.AI — global coding endpoint"),
             ("zai-cn", "Z.AI — China coding endpoint (open.bigmodel.cn)"),
@@ -2454,6 +2602,7 @@ async fn setup_provider(workspace_dir: &Path) -> Result<(String, String, String,
                 "deepseek" => "https://platform.deepseek.com/api_keys",
                 "together-ai" => "https://api.together.xyz/settings/api-keys",
                 "fireworks" => "https://fireworks.ai/account/api-keys",
+                "novita" => "https://novita.ai/settings/key-management",
                 "perplexity" => "https://www.perplexity.ai/settings/api",
                 "xai" => "https://console.x.ai",
                 "cohere" => "https://dashboard.cohere.com/api-keys",
@@ -2730,7 +2879,7 @@ fn provider_env_var(name: &str) -> &'static str {
     match canonical_provider_name(name) {
         "openrouter" => "OPENROUTER_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
-        "openai" => "OPENAI_API_KEY",
+        "openai-codex" | "openai" => "OPENAI_API_KEY",
         "ollama" => "OLLAMA_API_KEY",
         "llamacpp" => "LLAMACPP_API_KEY",
         "sglang" => "SGLANG_API_KEY",
@@ -2743,6 +2892,7 @@ fn provider_env_var(name: &str) -> &'static str {
         "xai" => "XAI_API_KEY",
         "together-ai" => "TOGETHER_API_KEY",
         "fireworks" | "fireworks-ai" => "FIREWORKS_API_KEY",
+        "novita" => "NOVITA_API_KEY",
         "perplexity" => "PERPLEXITY_API_KEY",
         "cohere" => "COHERE_API_KEY",
         "kimi-code" => "KIMI_CODE_API_KEY",
@@ -2750,6 +2900,7 @@ fn provider_env_var(name: &str) -> &'static str {
         "glm" => "GLM_API_KEY",
         "minimax" => "MINIMAX_API_KEY",
         "qwen" => "DASHSCOPE_API_KEY",
+        "hunyuan" => "HUNYUAN_API_KEY",
         "qianfan" => "QIANFAN_API_KEY",
         "zai" => "ZAI_API_KEY",
         "synthetic" => "SYNTHETIC_API_KEY",
@@ -2768,6 +2919,13 @@ fn provider_supports_keyless_local_usage(provider_name: &str) -> bool {
     matches!(
         canonical_provider_name(provider_name),
         "ollama" | "llamacpp" | "sglang" | "vllm" | "osaurus"
+    )
+}
+
+fn provider_supports_device_flow(provider_name: &str) -> bool {
+    matches!(
+        canonical_provider_name(provider_name),
+        "copilot" | "gemini" | "openai-codex"
     )
 }
 
@@ -3069,6 +3227,7 @@ fn setup_project_context() -> Result<ProjectContext> {
         "Europe/London (GMT/BST)",
         "Europe/Berlin (CET/CEST)",
         "Asia/Tokyo (JST)",
+        "Asia/Shanghai (CST)",
         "UTC",
         "Other (type manually)",
     ];
@@ -3203,8 +3362,7 @@ enum ChannelMenuChoice {
     NextcloudTalk,
     DingTalk,
     QqOfficial,
-    Lark,
-    Feishu,
+    LarkFeishu,
     Nostr,
     Done,
 }
@@ -3223,8 +3381,7 @@ const CHANNEL_MENU_CHOICES: &[ChannelMenuChoice] = &[
     ChannelMenuChoice::NextcloudTalk,
     ChannelMenuChoice::DingTalk,
     ChannelMenuChoice::QqOfficial,
-    ChannelMenuChoice::Lark,
-    ChannelMenuChoice::Feishu,
+    ChannelMenuChoice::LarkFeishu,
     ChannelMenuChoice::Nostr,
     ChannelMenuChoice::Done,
 ];
@@ -3350,22 +3507,12 @@ fn setup_channels() -> Result<ChannelsConfig> {
                         "— Tencent QQ Bot"
                     }
                 ),
-                ChannelMenuChoice::Lark => format!(
-                    "Lark       {}",
-                    if config.lark.as_ref().is_some_and(|cfg| !cfg.use_feishu) {
+                ChannelMenuChoice::LarkFeishu => format!(
+                    "Lark/Feishu {}",
+                    if config.lark.is_some() {
                         "✅ connected"
                     } else {
-                        "— Lark Bot"
-                    }
-                ),
-                ChannelMenuChoice::Feishu => format!(
-                    "Feishu     {}",
-                    if config.feishu.is_some()
-                        || config.lark.as_ref().is_some_and(|cfg| cfg.use_feishu)
-                    {
-                        "✅ connected"
-                    } else {
-                        "— Feishu Bot"
+                        "— Lark/Feishu Bot"
                     }
                 ),
                 ChannelMenuChoice::Nostr => format!(
@@ -3870,6 +4017,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     device_id: detected_device_id,
                     room_id,
                     allowed_users,
+                    mention_only: false,
                 });
             }
             ChannelMenuChoice::Signal => {
@@ -4618,36 +4766,35 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .filter(|s| !s.is_empty())
                     .collect();
 
+                let receive_mode_choice = Select::new()
+                    .with_prompt("  Receive mode")
+                    .items(["Webhook (recommended)", "WebSocket (legacy fallback)"])
+                    .default(0)
+                    .interact()?;
+                let receive_mode = if receive_mode_choice == 0 {
+                    QQReceiveMode::Webhook
+                } else {
+                    QQReceiveMode::Websocket
+                };
+
                 config.qq = Some(QQConfig {
                     app_id,
                     app_secret,
                     allowed_users,
+                    receive_mode,
                 });
             }
-            ChannelMenuChoice::Lark | ChannelMenuChoice::Feishu => {
-                let is_feishu = matches!(choice, ChannelMenuChoice::Feishu);
-                let provider_label = if is_feishu { "Feishu" } else { "Lark" };
-                let provider_host = if is_feishu {
-                    "open.feishu.cn"
-                } else {
-                    "open.larksuite.com"
-                };
-                let base_url = if is_feishu {
-                    "https://open.feishu.cn/open-apis"
-                } else {
-                    "https://open.larksuite.com/open-apis"
-                };
-
-                // ── Lark / Feishu ──
+            ChannelMenuChoice::LarkFeishu => {
+                // ── Lark/Feishu ──
                 println!();
                 println!(
                     "  {} {}",
-                    style(format!("{provider_label} Setup")).white().bold(),
-                    style(format!("— talk to ZeroClaw from {provider_label}")).dim()
+                    style("Lark/Feishu Setup").white().bold(),
+                    style("— talk to ZeroClaw from Lark or Feishu").dim()
                 );
-                print_bullet(&format!(
-                    "1. Go to {provider_label} Open Platform ({provider_host})"
-                ));
+                print_bullet(
+                    "1. Go to Lark/Feishu Open Platform (open.larksuite.com / open.feishu.cn)",
+                );
                 print_bullet("2. Create an app and enable 'Bot' capability");
                 print_bullet("3. Copy the App ID and App Secret");
                 println!();
@@ -4669,8 +4816,20 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     continue;
                 }
 
+                let use_feishu = Select::new()
+                    .with_prompt("  Region")
+                    .items(["Feishu (CN)", "Lark (International)"])
+                    .default(0)
+                    .interact()?
+                    == 0;
+
                 // Test connection (run entirely in separate thread — Response must be used/dropped there)
                 print!("  {} Testing connection... ", style("⏳").dim());
+                let base_url = if use_feishu {
+                    "https://open.feishu.cn/open-apis"
+                } else {
+                    "https://open.larksuite.com/open-apis"
+                };
                 let app_id_clone = app_id.clone();
                 let app_secret_clone = app_secret.clone();
                 let endpoint = format!("{base_url}/auth/v3/tenant_access_token/internal");
@@ -4716,7 +4875,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 match thread_result {
                     Ok(Ok(())) => {
                         println!(
-                            "\r  {} {provider_label} credentials verified        ",
+                            "\r  {} Lark/Feishu credentials verified        ",
                             style("✅").green().bold()
                         );
                     }
@@ -4796,33 +4955,22 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 if allowed_users.is_empty() {
                     println!(
-                        "  {} No users allowlisted — {provider_label} inbound messages will be denied until you add Open IDs or '*'.",
+                        "  {} No users allowlisted — Lark/Feishu inbound messages will be denied until you add Open IDs or '*'.",
                         style("⚠").yellow().bold()
                     );
                 }
 
-                if is_feishu {
-                    config.feishu = Some(FeishuConfig {
-                        app_id,
-                        app_secret,
-                        verification_token,
-                        encrypt_key: None,
-                        allowed_users,
-                        receive_mode,
-                        port,
-                    });
-                } else {
-                    config.lark = Some(LarkConfig {
-                        app_id,
-                        app_secret,
-                        verification_token,
-                        encrypt_key: None,
-                        allowed_users,
-                        use_feishu: false,
-                        receive_mode,
-                        port,
-                    });
-                }
+                config.lark = Some(LarkConfig {
+                    app_id,
+                    app_secret,
+                    verification_token,
+                    encrypt_key: None,
+                    allowed_users,
+                    mention_only: false,
+                    use_feishu,
+                    receive_mode,
+                    port,
+                });
             }
             ChannelMenuChoice::Nostr => {
                 // ── Nostr ──
@@ -5647,6 +5795,29 @@ mod tests {
         }
     }
 
+    async fn run_quick_setup_with_clean_env(
+        credential_override: Option<&str>,
+        provider: Option<&str>,
+        model_override: Option<&str>,
+        memory_backend: Option<&str>,
+        force: bool,
+        home: &Path,
+    ) -> Result<Config> {
+        let _env_guard = env_lock().lock().await;
+        let _workspace_env = EnvVarGuard::unset("ZEROCLAW_WORKSPACE");
+        let _config_env = EnvVarGuard::unset("ZEROCLAW_CONFIG_DIR");
+
+        run_quick_setup_with_home(
+            credential_override,
+            provider,
+            model_override,
+            memory_backend,
+            force,
+            home,
+        )
+        .await
+    }
+
     // ── ProjectContext defaults ──────────────────────────────────
 
     #[test]
@@ -5695,7 +5866,7 @@ mod tests {
         apply_provider_update(
             &mut config,
             "anthropic".to_string(),
-            "".to_string(),
+            String::new(),
             "claude-sonnet-4-5-20250929".to_string(),
             None,
         );
@@ -5711,12 +5882,9 @@ mod tests {
 
     #[tokio::test]
     async fn quick_setup_model_override_persists_to_config_toml() {
-        let _env_guard = env_lock().lock().await;
-        let _workspace_env = EnvVarGuard::unset("ZEROCLAW_WORKSPACE");
-        let _config_env = EnvVarGuard::unset("ZEROCLAW_CONFIG_DIR");
         let tmp = TempDir::new().unwrap();
 
-        let config = run_quick_setup_with_home(
+        let config = run_quick_setup_with_clean_env(
             Some("sk-issue946"),
             Some("openrouter"),
             Some("custom-model-946"),
@@ -5738,12 +5906,9 @@ mod tests {
 
     #[tokio::test]
     async fn quick_setup_without_model_uses_provider_default_model() {
-        let _env_guard = env_lock().lock().await;
-        let _workspace_env = EnvVarGuard::unset("ZEROCLAW_WORKSPACE");
-        let _config_env = EnvVarGuard::unset("ZEROCLAW_CONFIG_DIR");
         let tmp = TempDir::new().unwrap();
 
-        let config = run_quick_setup_with_home(
+        let config = run_quick_setup_with_clean_env(
             Some("sk-issue946"),
             Some("anthropic"),
             None,
@@ -5761,9 +5926,6 @@ mod tests {
 
     #[tokio::test]
     async fn quick_setup_existing_config_requires_force_when_non_interactive() {
-        let _env_guard = env_lock().lock().await;
-        let _workspace_env = EnvVarGuard::unset("ZEROCLAW_WORKSPACE");
-        let _config_env = EnvVarGuard::unset("ZEROCLAW_CONFIG_DIR");
         let tmp = TempDir::new().unwrap();
         let zeroclaw_dir = tmp.path().join(".zeroclaw");
         let config_path = zeroclaw_dir.join("config.toml");
@@ -5773,7 +5935,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = run_quick_setup_with_home(
+        let err = run_quick_setup_with_clean_env(
             Some("sk-existing"),
             Some("openrouter"),
             Some("custom-model"),
@@ -5791,9 +5953,6 @@ mod tests {
 
     #[tokio::test]
     async fn quick_setup_existing_config_overwrites_with_force() {
-        let _env_guard = env_lock().lock().await;
-        let _workspace_env = EnvVarGuard::unset("ZEROCLAW_WORKSPACE");
-        let _config_env = EnvVarGuard::unset("ZEROCLAW_CONFIG_DIR");
         let tmp = TempDir::new().unwrap();
         let zeroclaw_dir = tmp.path().join(".zeroclaw");
         let config_path = zeroclaw_dir.join("config.toml");
@@ -5806,7 +5965,7 @@ mod tests {
         .await
         .unwrap();
 
-        let config = run_quick_setup_with_home(
+        let config = run_quick_setup_with_clean_env(
             Some("sk-force"),
             Some("openrouter"),
             Some("custom-model-fresh"),
@@ -6352,6 +6511,8 @@ mod tests {
         );
         assert_eq!(default_model_for_provider("venice"), "zai-org-glm-5");
         assert_eq!(default_model_for_provider("moonshot"), "kimi-k2.5");
+        assert_eq!(default_model_for_provider("hunyuan"), "hunyuan-t1-latest");
+        assert_eq!(default_model_for_provider("tencent"), "hunyuan-t1-latest");
         assert_eq!(
             default_model_for_provider("nvidia"),
             "meta/llama-3.3-70b-instruct"
@@ -6378,6 +6539,8 @@ mod tests {
         assert_eq!(canonical_provider_name("dashscope-us"), "qwen");
         assert_eq!(canonical_provider_name("qwen-code"), "qwen-code");
         assert_eq!(canonical_provider_name("qwen-oauth"), "qwen-code");
+        assert_eq!(canonical_provider_name("codex"), "openai-codex");
+        assert_eq!(canonical_provider_name("openai_codex"), "openai-codex");
         assert_eq!(canonical_provider_name("moonshot-intl"), "moonshot");
         assert_eq!(canonical_provider_name("kimi-cn"), "moonshot");
         assert_eq!(canonical_provider_name("kimi_coding"), "kimi-code");
@@ -6612,6 +6775,10 @@ mod tests {
     #[test]
     fn models_endpoint_for_provider_supports_additional_openai_compatible_providers() {
         assert_eq!(
+            models_endpoint_for_provider("openai-codex"),
+            Some("https://api.openai.com/v1/models")
+        );
+        assert_eq!(
             models_endpoint_for_provider("venice"),
             Some("https://api.venice.ai/api/v1/models")
         );
@@ -6681,6 +6848,18 @@ mod tests {
     }
 
     #[test]
+    fn resolve_live_models_endpoint_supports_custom_provider_urls() {
+        assert_eq!(
+            resolve_live_models_endpoint("custom:https://proxy.example.com/v1", None),
+            Some("https://proxy.example.com/v1/models".to_string())
+        );
+        assert_eq!(
+            resolve_live_models_endpoint("custom:https://proxy.example.com/v1/models", None),
+            Some("https://proxy.example.com/v1/models".to_string())
+        );
+    }
+
+    #[test]
     fn normalize_ollama_endpoint_url_strips_api_suffix_and_trailing_slash() {
         assert_eq!(
             normalize_ollama_endpoint_url(" https://ollama.com/api/ "),
@@ -6741,6 +6920,17 @@ mod tests {
 
         let ids = parse_openai_compatible_model_ids(&payload);
         assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn normalize_model_ids_deduplicates_case_insensitively() {
+        let ids = normalize_model_ids(vec![
+            "GPT-5".to_string(),
+            "gpt-5".to_string(),
+            "gpt-5-mini".to_string(),
+            " GPT-5-MINI ".to_string(),
+        ]);
+        assert_eq!(ids, vec!["GPT-5".to_string(), "gpt-5-mini".to_string()]);
     }
 
     #[test]
@@ -6869,6 +7059,7 @@ mod tests {
     fn provider_env_var_known_providers() {
         assert_eq!(provider_env_var("openrouter"), "OPENROUTER_API_KEY");
         assert_eq!(provider_env_var("anthropic"), "ANTHROPIC_API_KEY");
+        assert_eq!(provider_env_var("openai-codex"), "OPENAI_API_KEY");
         assert_eq!(provider_env_var("openai"), "OPENAI_API_KEY");
         assert_eq!(provider_env_var("ollama"), "OLLAMA_API_KEY");
         assert_eq!(provider_env_var("llamacpp"), "LLAMACPP_API_KEY");
@@ -6900,6 +7091,8 @@ mod tests {
         assert_eq!(provider_env_var("nvidia-nim"), "NVIDIA_API_KEY"); // alias
         assert_eq!(provider_env_var("build.nvidia.com"), "NVIDIA_API_KEY"); // alias
         assert_eq!(provider_env_var("astrai"), "ASTRAI_API_KEY");
+        assert_eq!(provider_env_var("hunyuan"), "HUNYUAN_API_KEY");
+        assert_eq!(provider_env_var("tencent"), "HUNYUAN_API_KEY"); // alias
     }
 
     #[test]
@@ -6910,6 +7103,16 @@ mod tests {
         assert!(provider_supports_keyless_local_usage("sglang"));
         assert!(provider_supports_keyless_local_usage("vllm"));
         assert!(!provider_supports_keyless_local_usage("openai"));
+    }
+
+    #[test]
+    fn provider_supports_device_flow_copilot() {
+        assert!(provider_supports_device_flow("copilot"));
+        assert!(provider_supports_device_flow("github-copilot"));
+        assert!(provider_supports_device_flow("gemini"));
+        assert!(provider_supports_device_flow("openai-codex"));
+        assert!(!provider_supports_device_flow("openai"));
+        assert!(!provider_supports_device_flow("openrouter"));
     }
 
     #[test]
@@ -6976,15 +7179,13 @@ mod tests {
     }
 
     #[test]
-    fn channel_menu_choices_include_signal_nextcloud_lark_and_feishu() {
+    fn channel_menu_choices_include_signal_and_nextcloud_talk() {
         assert!(channel_menu_choices().contains(&ChannelMenuChoice::Signal));
         assert!(channel_menu_choices().contains(&ChannelMenuChoice::NextcloudTalk));
-        assert!(channel_menu_choices().contains(&ChannelMenuChoice::Lark));
-        assert!(channel_menu_choices().contains(&ChannelMenuChoice::Feishu));
     }
 
     #[test]
-    fn launchable_channels_include_signal_mattermost_qq_nextcloud_and_feishu() {
+    fn launchable_channels_include_signal_mattermost_qq_and_nextcloud_talk() {
         let mut channels = ChannelsConfig::default();
         assert!(!has_launchable_channels(&channels));
 
@@ -7014,6 +7215,7 @@ mod tests {
             app_id: "app-id".into(),
             app_secret: "app-secret".into(),
             allowed_users: vec!["*".into()],
+            receive_mode: crate::config::schema::QQReceiveMode::Websocket,
         });
         assert!(has_launchable_channels(&channels));
 
@@ -7023,18 +7225,6 @@ mod tests {
             app_token: "token".into(),
             webhook_secret: Some("secret".into()),
             allowed_users: vec!["*".into()],
-        });
-        assert!(has_launchable_channels(&channels));
-
-        channels.nextcloud_talk = None;
-        channels.feishu = Some(crate::config::schema::FeishuConfig {
-            app_id: "cli_123".into(),
-            app_secret: "secret".into(),
-            encrypt_key: None,
-            verification_token: None,
-            allowed_users: vec!["*".into()],
-            receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
-            port: None,
         });
         assert!(has_launchable_channels(&channels));
     }

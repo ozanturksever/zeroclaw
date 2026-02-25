@@ -28,17 +28,17 @@ pub async fn run(config: Config) -> Result<()> {
         &config.workspace_dir,
     ));
 
-    crate::health::mark_component_ok(SCHEDULER_COMPONENT).await;
+    crate::health::mark_component_ok(SCHEDULER_COMPONENT);
 
     loop {
         interval.tick().await;
         // Keep scheduler liveness fresh even when there are no due jobs.
-        crate::health::mark_component_ok(SCHEDULER_COMPONENT).await;
+        crate::health::mark_component_ok(SCHEDULER_COMPONENT);
 
         let jobs = match due_jobs(&config, Utc::now()) {
             Ok(jobs) => jobs,
             Err(e) => {
-                crate::health::mark_component_error(SCHEDULER_COMPONENT, e.to_string()).await;
+                crate::health::mark_component_error(SCHEDULER_COMPONENT, e.to_string());
                 tracing::warn!("Scheduler query failed: {e}");
                 continue;
             }
@@ -95,7 +95,7 @@ async fn process_due_jobs(
     component: &str,
 ) {
     // Refresh scheduler health on every successful poll cycle, including idle cycles.
-    crate::health::mark_component_ok(component).await;
+    crate::health::mark_component_ok(component);
 
     let max_concurrent = config.scheduler.max_concurrent.max(1);
     let mut in_flight =
@@ -124,7 +124,7 @@ async fn execute_and_persist_job(
     job: &CronJob,
     component: &str,
 ) -> (String, bool, String) {
-    crate::health::mark_component_ok(component).await;
+    crate::health::mark_component_ok(component);
     warn_if_high_frequency_agent_job(job);
 
     let started_at = Utc::now();
@@ -147,14 +147,14 @@ async fn run_agent_job(
         );
     }
 
-    if security.is_rate_limited().await {
+    if security.is_rate_limited() {
         return (
             false,
             "blocked by security policy: rate limit exceeded".to_string(),
         );
     }
 
-    if !security.record_action().await {
+    if !security.record_action() {
         return (
             false,
             "blocked by security policy: action budget exhausted".to_string(),
@@ -316,8 +316,7 @@ pub(crate) async fn deliver_announcement(
                 tg.bot_token.clone(),
                 tg.allowed_users.clone(),
                 tg.mention_only,
-            )
-            .await;
+            );
             channel.send(&SendMessage::new(output, target)).await?;
         }
         "discord" => {
@@ -397,7 +396,7 @@ async fn run_job_command_with_timeout(
         );
     }
 
-    if security.is_rate_limited().await {
+    if security.is_rate_limited() {
         return (
             false,
             "blocked by security policy: rate limit exceeded".to_string(),
@@ -421,7 +420,7 @@ async fn run_job_command_with_timeout(
         );
     }
 
-    if !security.record_action().await {
+    if !security.record_action() {
         return (
             false,
             "blocked by security policy: action budget exhausted".to_string(),
@@ -764,7 +763,7 @@ mod tests {
         crate::health::mark_component_error(&component, "pre-existing error");
         process_due_jobs(&config, &security, Vec::new(), &component).await;
 
-        let snapshot = crate::health::snapshot_json().await;
+        let snapshot = crate::health::snapshot_json();
         let entry = &snapshot["components"][component.as_str()];
         assert_eq!(entry["status"], "ok");
         assert!(entry["last_ok"].as_str().is_some());
@@ -785,7 +784,7 @@ mod tests {
         crate::health::mark_component_ok(&component);
         process_due_jobs(&config, &security, vec![job], &component).await;
 
-        let snapshot = crate::health::snapshot_json().await;
+        let snapshot = crate::health::snapshot_json();
         let entry = &snapshot["components"][component.as_str()];
         assert_eq!(entry["status"], "ok");
     }
@@ -889,6 +888,110 @@ mod tests {
         let updated = cron::get_job(&config, &job.id).unwrap();
         assert!(!updated.enabled);
         assert_eq!(updated.last_status.as_deref(), Some("error"));
+    }
+
+    #[tokio::test]
+    async fn persist_job_result_delivery_failure_non_best_effort_marks_error() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = cron::add_agent_job(
+            &config,
+            Some("announce-job".into()),
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "deliver this",
+            SessionTarget::Isolated,
+            None,
+            Some(DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("telegram".into()),
+                to: Some("123456".into()),
+                best_effort: false,
+            }),
+            false,
+        )
+        .unwrap();
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+
+        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        assert!(!success);
+
+        let updated = cron::get_job(&config, &job.id).unwrap();
+        assert!(updated.enabled);
+        assert_eq!(updated.last_status.as_deref(), Some("error"));
+
+        let runs = cron::list_runs(&config, &job.id, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "error");
+    }
+
+    #[tokio::test]
+    async fn persist_job_result_delivery_failure_best_effort_keeps_success() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = cron::add_agent_job(
+            &config,
+            Some("announce-job-best-effort".into()),
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "deliver this",
+            SessionTarget::Isolated,
+            None,
+            Some(DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("telegram".into()),
+                to: Some("123456".into()),
+                best_effort: true,
+            }),
+            false,
+        )
+        .unwrap();
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+
+        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        assert!(success);
+
+        let updated = cron::get_job(&config, &job.id).unwrap();
+        assert!(updated.enabled);
+        assert_eq!(updated.last_status.as_deref(), Some("ok"));
+
+        let runs = cron::list_runs(&config, &job.id, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "ok");
+    }
+
+    #[tokio::test]
+    async fn persist_job_result_at_schedule_without_delete_after_run_is_not_deleted() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let at = Utc::now() + ChronoDuration::minutes(10);
+        let job = cron::add_agent_job(
+            &config,
+            Some("at-no-autodelete".into()),
+            crate::cron::Schedule::At { at },
+            "Hello",
+            SessionTarget::Isolated,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(!job.delete_after_run);
+
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        assert!(success);
+
+        let updated = cron::get_job(&config, &job.id).unwrap();
+        assert!(updated.enabled);
+        assert_eq!(updated.last_status.as_deref(), Some("ok"));
     }
 
     #[tokio::test]

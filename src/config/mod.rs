@@ -5,21 +5,23 @@ pub mod traits;
 pub use schema::{
     apply_runtime_proxy_to_builder, build_runtime_proxy_client,
     build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
-    AgentConfig, AuditConfig, AutonomyConfig, BrowserComputerUseConfig, BrowserConfig,
-    BuiltinHooksConfig, ChannelsConfig, ClassificationRule, ComposioConfig, Config, CostConfig,
-    CronConfig, DelegateAgentConfig, DinkConfig, DiscordConfig, DockerRuntimeConfig,
+    AgentConfig, AgentsIpcConfig, AuditConfig, AutonomyConfig, BrowserComputerUseConfig,
+    BrowserConfig, BuiltinHooksConfig, ChannelsConfig, ClassificationRule, ComposioConfig, Config,
+    CostConfig, CronConfig, DelegateAgentConfig, DiscordConfig, DockerRuntimeConfig,
     EmbeddingRouteConfig, EstopConfig, FeishuConfig, GatewayConfig, HardwareConfig,
     HardwareTransport, HeartbeatConfig, HooksConfig, HttpRequestConfig, IMessageConfig,
     IdentityConfig, LarkConfig, MatrixConfig, MemoryConfig, ModelRouteConfig, MultimodalConfig,
-    NextcloudTalkConfig, ObservabilityConfig, OossInstanceIdentity, OtpConfig, OtpMethod,
-    PeripheralBoardConfig, PeripheralsConfig, ProxyConfig, ProxyScope, QueryClassificationConfig,
-    ReliabilityConfig, ResourceLimitsConfig, RuntimeConfig, SandboxBackend, SandboxConfig,
-    SchedulerConfig, SecretsConfig, SecurityConfig, SkillsConfig, SkillsPromptInjectionMode,
-    SlackConfig, StorageConfig, StorageProviderConfig, StorageProviderSection, StreamMode,
-    TelegramConfig, TranscriptionConfig, TunnelConfig, WebSearchConfig, WebhookConfig,
+    NextcloudTalkConfig, ObservabilityConfig, OtpConfig, OtpMethod, PeripheralBoardConfig,
+    PeripheralsConfig, ProviderConfig, ProxyConfig, ProxyScope, QdrantConfig,
+    QueryClassificationConfig, ReliabilityConfig, ResearchPhaseConfig, ResearchTrigger,
+    ResourceLimitsConfig, RuntimeConfig, SandboxBackend, SandboxConfig, SchedulerConfig,
+    SecretsConfig, SecurityConfig, SkillsConfig, SkillsPromptInjectionMode, SlackConfig,
+    StorageConfig, StorageProviderConfig, StorageProviderSection, StreamMode, SyscallAnomalyConfig,
+    TelegramConfig, TranscriptionConfig, TunnelConfig, WasmCapabilityEscalationMode,
+    WasmRuntimeConfig, WasmSecurityConfig, WebFetchConfig, WebSearchConfig, WebhookConfig,
 };
 
-pub fn name_and_presence<T: traits::ChannelConfig>(channel: &Option<T>) -> (&'static str, bool) {
+pub fn name_and_presence<T: traits::ChannelConfig>(channel: Option<&T>) -> (&'static str, bool) {
     (T::name(), channel.is_some())
 }
 
@@ -61,6 +63,7 @@ mod tests {
             encrypt_key: None,
             verification_token: None,
             allowed_users: vec![],
+            mention_only: false,
             use_feishu: false,
             receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
             port: None,

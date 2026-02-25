@@ -1,7 +1,7 @@
+use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Instant;
 
 /// How much autonomy the agent has
@@ -15,6 +15,21 @@ pub enum AutonomyLevel {
     Supervised,
     /// Full: autonomous execution within policy bounds
     Full,
+}
+
+impl std::str::FromStr for AutonomyLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "read_only" | "readonly" => Ok(Self::ReadOnly),
+            "supervised" => Ok(Self::Supervised),
+            "full" => Ok(Self::Full),
+            _ => Err(format!(
+                "invalid autonomy level '{s}': expected read_only, supervised, or full"
+            )),
+        }
+    }
 }
 
 /// Risk score for shell command execution.
@@ -48,7 +63,7 @@ impl ActionTracker {
 
     /// Record an action and return the current count within the window.
     pub fn record(&self) -> usize {
-        let mut actions = self.actions.lock().unwrap();
+        let mut actions = self.actions.lock();
         let cutoff = Instant::now()
             .checked_sub(std::time::Duration::from_secs(3600))
             .unwrap_or_else(Instant::now);
@@ -59,7 +74,7 @@ impl ActionTracker {
 
     /// Count of actions in the current window without recording.
     pub fn count(&self) -> usize {
-        let mut actions = self.actions.lock().unwrap();
+        let mut actions = self.actions.lock();
         let cutoff = Instant::now()
             .checked_sub(std::time::Duration::from_secs(3600))
             .unwrap_or_else(Instant::now);
@@ -70,7 +85,7 @@ impl ActionTracker {
 
 impl Clone for ActionTracker {
     fn clone(&self) -> Self {
-        let actions = self.actions.lock().unwrap();
+        let actions = self.actions.lock();
         Self {
             actions: Mutex::new(actions.clone()),
         }
@@ -677,6 +692,10 @@ impl SecurityPolicy {
             return Err(format!("Command not allowed by security policy: {command}"));
         }
 
+        if let Some(path) = self.forbidden_path_argument(command) {
+            return Err(format!("Path blocked by security policy: {path}"));
+        }
+
         let risk = self.command_risk_level(command);
 
         if risk == CommandRiskLevel::High {
@@ -725,10 +744,10 @@ impl SecurityPolicy {
 
         // Block subshell/expansion operators — these allow hiding arbitrary
         // commands inside an allowed command (e.g. `echo $(rm -rf /)`) and
-        // bypassing path checks through variable indirection.
+        // bypassing path checks through variable indirection. The helper below
+        // ignores escapes and literals inside single quotes, so `$(` or `${`
+        // literals are permitted there.
         if command.contains('`')
-            || command.contains("$(")
-            || command.contains("${")
             || contains_unquoted_shell_variable_expansion(command)
             || command.contains("<(")
             || command.contains(">(")
@@ -941,7 +960,6 @@ impl SecurityPolicy {
     /// Validate that a resolved path is inside the workspace or an allowed root.
     /// Call this AFTER joining `workspace_dir` + relative path and canonicalizing.
     pub fn is_resolved_path_allowed(&self, resolved: &Path) -> bool {
-        // Must be under workspace_dir (prevents symlink escapes).
         // Prefer canonical workspace root so `/a/../b` style config paths don't
         // cause false positives or negatives.
         let workspace_root = self
@@ -952,12 +970,29 @@ impl SecurityPolicy {
             return true;
         }
 
-        // Check extra allowed roots (e.g. shared skills directories).
+        // Check extra allowed roots (e.g. shared skills directories) before
+        // forbidden checks so explicit allowlists can coexist with broad
+        // default forbidden roots such as `/home` and `/tmp`.
         for root in &self.allowed_roots {
             let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
             if resolved.starts_with(&canonical) {
                 return true;
             }
+        }
+
+        // For paths outside workspace/allowlist, block forbidden roots to
+        // prevent symlink escapes and sensitive directory access.
+        for forbidden in &self.forbidden_paths {
+            let forbidden_path = expand_user_path(forbidden);
+            if resolved.starts_with(&forbidden_path) {
+                return false;
+            }
+        }
+
+        // When workspace_only is disabled the user explicitly opted out of
+        // workspace confinement after forbidden-path checks are applied.
+        if !self.workspace_only {
+            return true;
         }
 
         false
@@ -991,7 +1026,7 @@ impl SecurityPolicy {
     ///
     /// Read operations are always allowed by autonomy/rate gates.
     /// Act operations require non-readonly autonomy and available action budget.
-    pub async fn enforce_tool_operation(
+    pub fn enforce_tool_operation(
         &self,
         operation: ToolOperation,
         operation_name: &str,
@@ -1005,7 +1040,7 @@ impl SecurityPolicy {
                     ));
                 }
 
-                if !self.record_action().await {
+                if !self.record_action() {
                     return Err("Rate limit exceeded: action budget exhausted".to_string());
                 }
 
@@ -1016,13 +1051,13 @@ impl SecurityPolicy {
 
     /// Record an action and check if the rate limit has been exceeded.
     /// Returns `true` if the action is allowed, `false` if rate-limited.
-    pub async fn record_action(&self) -> bool {
+    pub fn record_action(&self) -> bool {
         let count = self.tracker.record();
         count <= self.max_actions_per_hour as usize
     }
 
     /// Check if the rate limit would be exceeded without recording.
-    pub async fn is_rate_limited(&self) -> bool {
+    pub fn is_rate_limited(&self) -> bool {
         self.tracker.count() >= self.max_actions_per_hour as usize
     }
 
@@ -1113,34 +1148,31 @@ mod tests {
         assert!(full_policy().can_act());
     }
 
-    #[tokio::test]
-    async fn enforce_tool_operation_read_allowed_in_readonly_mode() {
+    #[test]
+    fn enforce_tool_operation_read_allowed_in_readonly_mode() {
         let p = readonly_policy();
         assert!(p
             .enforce_tool_operation(ToolOperation::Read, "memory_recall")
-            .await
             .is_ok());
     }
 
-    #[tokio::test]
-    async fn enforce_tool_operation_act_blocked_in_readonly_mode() {
+    #[test]
+    fn enforce_tool_operation_act_blocked_in_readonly_mode() {
         let p = readonly_policy();
         let err = p
             .enforce_tool_operation(ToolOperation::Act, "memory_store")
-            .await
             .unwrap_err();
         assert!(err.contains("read-only mode"));
     }
 
-    #[tokio::test]
-    async fn enforce_tool_operation_act_uses_rate_budget() {
+    #[test]
+    fn enforce_tool_operation_act_uses_rate_budget() {
         let p = SecurityPolicy {
             max_actions_per_hour: 0,
             ..default_policy()
         };
         let err = p
             .enforce_tool_operation(ToolOperation::Act, "memory_store")
-            .await
             .unwrap_err();
         assert!(err.contains("Rate limit exceeded"));
     }
@@ -1213,7 +1245,7 @@ mod tests {
         assert!(p.is_command_allowed("/usr/bin/antigravity"));
 
         // Wildcard still respects risk gates in validate_command_execution.
-        let blocked = p.validate_command_execution("rm -rf /tmp/test", true);
+        let blocked = p.validate_command_execution("rm -rf tmp_test_dir", true);
         assert!(blocked.is_err());
         assert!(blocked.unwrap_err().contains("high-risk"));
     }
@@ -1318,7 +1350,7 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let result = p.validate_command_execution("rm -rf /tmp/test", true);
+        let result = p.validate_command_execution("rm -rf tmp_test_dir", true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("high-risk"));
     }
@@ -1482,14 +1514,14 @@ mod tests {
 
     // ── ActionTracker / rate limiting ───────────────────────
 
-    #[tokio::test]
-    async fn action_tracker_starts_at_zero() {
+    #[test]
+    fn action_tracker_starts_at_zero() {
         let tracker = ActionTracker::new();
         assert_eq!(tracker.count(), 0);
     }
 
-    #[tokio::test]
-    async fn action_tracker_records_actions() {
+    #[test]
+    fn action_tracker_records_actions() {
         let tracker = ActionTracker::new();
         assert_eq!(tracker.record(), 1);
         assert_eq!(tracker.record(), 2);
@@ -1497,44 +1529,44 @@ mod tests {
         assert_eq!(tracker.count(), 3);
     }
 
-    #[tokio::test]
-    async fn record_action_allows_within_limit() {
+    #[test]
+    fn record_action_allows_within_limit() {
         let p = SecurityPolicy {
             max_actions_per_hour: 5,
             ..SecurityPolicy::default()
         };
         for _ in 0..5 {
-            assert!(p.record_action().await, "should allow actions within limit");
+            assert!(p.record_action(), "should allow actions within limit");
         }
     }
 
-    #[tokio::test]
-    async fn record_action_blocks_over_limit() {
+    #[test]
+    fn record_action_blocks_over_limit() {
         let p = SecurityPolicy {
             max_actions_per_hour: 3,
             ..SecurityPolicy::default()
         };
-        assert!(p.record_action().await); // 1
-        assert!(p.record_action().await); // 2
-        assert!(p.record_action().await); // 3
-        assert!(!p.record_action().await); // 4 — over limit
+        assert!(p.record_action()); // 1
+        assert!(p.record_action()); // 2
+        assert!(p.record_action()); // 3
+        assert!(!p.record_action()); // 4 — over limit
     }
 
-    #[tokio::test]
-    async fn is_rate_limited_reflects_count() {
+    #[test]
+    fn is_rate_limited_reflects_count() {
         let p = SecurityPolicy {
             max_actions_per_hour: 2,
             ..SecurityPolicy::default()
         };
-        assert!(!p.is_rate_limited().await);
-        p.record_action().await;
-        assert!(!p.is_rate_limited().await);
-        p.record_action().await;
-        assert!(p.is_rate_limited().await);
+        assert!(!p.is_rate_limited());
+        p.record_action();
+        assert!(!p.is_rate_limited());
+        p.record_action();
+        assert!(p.is_rate_limited());
     }
 
-    #[tokio::test]
-    async fn action_tracker_clone_is_independent() {
+    #[test]
+    fn action_tracker_clone_is_independent() {
         let tracker = ActionTracker::new();
         tracker.record();
         tracker.record();
@@ -1599,6 +1631,24 @@ mod tests {
         let p = default_policy();
         assert!(!p.is_command_allowed("echo $(cat /etc/passwd)"));
         assert!(!p.is_command_allowed("echo $(rm -rf /)"));
+    }
+
+    #[test]
+    fn command_injection_dollar_paren_literal_inside_single_quotes_allowed() {
+        let p = default_policy();
+        assert!(p.is_command_allowed("echo '$(cat /etc/passwd)'"));
+    }
+
+    #[test]
+    fn command_injection_dollar_brace_literal_inside_single_quotes_allowed() {
+        let p = default_policy();
+        assert!(p.is_command_allowed("echo '${HOME}'"));
+    }
+
+    #[test]
+    fn command_injection_dollar_brace_unquoted_blocked() {
+        let p = default_policy();
+        assert!(!p.is_command_allowed("echo ${HOME}"));
     }
 
     #[test]
@@ -1720,6 +1770,15 @@ mod tests {
             p.forbidden_path_argument("cat /etc/passwd"),
             Some("/etc/passwd".into())
         );
+    }
+
+    #[test]
+    fn validate_command_execution_rejects_forbidden_paths() {
+        let p = default_policy();
+        let err = p
+            .validate_command_execution("cat /etc/shadow", false)
+            .unwrap_err();
+        assert!(err.contains("Path blocked by security policy"));
     }
 
     #[test]
@@ -1867,34 +1926,34 @@ mod tests {
 
     // ── Edge cases: rate limiter boundary ────────────────────
 
-    #[tokio::test]
-    async fn rate_limit_exactly_at_boundary() {
+    #[test]
+    fn rate_limit_exactly_at_boundary() {
         let p = SecurityPolicy {
             max_actions_per_hour: 1,
             ..SecurityPolicy::default()
         };
-        assert!(p.record_action().await); // 1 — exactly at limit
-        assert!(!p.record_action().await); // 2 — over
-        assert!(!p.record_action().await); // 3 — still over
+        assert!(p.record_action()); // 1 — exactly at limit
+        assert!(!p.record_action()); // 2 — over
+        assert!(!p.record_action()); // 3 — still over
     }
 
-    #[tokio::test]
-    async fn rate_limit_zero_blocks_everything() {
+    #[test]
+    fn rate_limit_zero_blocks_everything() {
         let p = SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
         };
-        assert!(!p.record_action().await);
+        assert!(!p.record_action());
     }
 
-    #[tokio::test]
-    async fn rate_limit_high_allows_many() {
+    #[test]
+    fn rate_limit_high_allows_many() {
         let p = SecurityPolicy {
             max_actions_per_hour: 10000,
             ..SecurityPolicy::default()
         };
         for _ in 0..100 {
-            assert!(p.record_action().await);
+            assert!(p.record_action());
         }
     }
 
@@ -1934,10 +1993,82 @@ mod tests {
         assert!(!p.is_path_allowed("/root/.bashrc"));
     }
 
+    #[test]
+    fn workspace_only_false_allows_resolved_outside_workspace() {
+        let workspace = std::env::temp_dir().join("zeroclaw_test_ws_only_false");
+        let _ = std::fs::create_dir_all(&workspace);
+        let canonical_workspace = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.clone());
+
+        let p = SecurityPolicy {
+            workspace_dir: canonical_workspace.clone(),
+            workspace_only: false,
+            forbidden_paths: vec!["/etc".into(), "/var".into()],
+            ..SecurityPolicy::default()
+        };
+
+        // Path outside workspace should be allowed when workspace_only=false
+        let outside = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/home"))
+            .join("zeroclaw_outside_ws");
+        assert!(
+            p.is_resolved_path_allowed(&outside),
+            "workspace_only=false must allow resolved paths outside workspace"
+        );
+
+        // Forbidden paths must still be blocked even with workspace_only=false
+        assert!(
+            !p.is_resolved_path_allowed(Path::new("/etc/passwd")),
+            "forbidden paths must be blocked even when workspace_only=false"
+        );
+        assert!(
+            !p.is_resolved_path_allowed(Path::new("/var/run/docker.sock")),
+            "forbidden /var must be blocked even when workspace_only=false"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn workspace_only_true_blocks_resolved_outside_workspace() {
+        let workspace = std::env::temp_dir().join("zeroclaw_test_ws_only_true");
+        let _ = std::fs::create_dir_all(&workspace);
+        let canonical_workspace = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.clone());
+
+        let p = SecurityPolicy {
+            workspace_dir: canonical_workspace.clone(),
+            workspace_only: true,
+            ..SecurityPolicy::default()
+        };
+
+        // Path inside workspace — allowed
+        let inside = canonical_workspace.join("subdir");
+        assert!(
+            p.is_resolved_path_allowed(&inside),
+            "path inside workspace must be allowed"
+        );
+
+        // Path outside workspace — blocked
+        let outside = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join("zeroclaw_outside_ws_true");
+        assert!(
+            !p.is_resolved_path_allowed(&outside),
+            "workspace_only=true must block resolved paths outside workspace"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     // ── Edge cases: from_config preserves tracker ────────────
 
-    #[tokio::test]
-    async fn from_config_creates_fresh_tracker() {
+    #[test]
+    fn from_config_creates_fresh_tracker() {
         let autonomy_config = crate::config::AutonomyConfig {
             level: AutonomyLevel::Full,
             workspace_only: false,
@@ -1952,7 +2083,7 @@ mod tests {
         let workspace = PathBuf::from("/tmp/test");
         let policy = SecurityPolicy::from_config(&autonomy_config, &workspace);
         assert_eq!(policy.tracker.count(), 0);
-        assert!(!policy.is_rate_limited().await);
+        assert!(!policy.is_rate_limited());
     }
 
     // ══════════════════════════════════════════════════════════

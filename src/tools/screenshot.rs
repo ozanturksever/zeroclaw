@@ -150,6 +150,7 @@ impl ScreenshotTool {
     }
 
     /// Read the screenshot file and return base64-encoded result.
+    #[allow(clippy::incompatible_msrv)]
     async fn read_and_encode(output_path: &std::path::Path) -> anyhow::Result<ToolResult> {
         // Check file size before reading to prevent OOM on large screenshots
         const MAX_RAW_BYTES: u64 = 1_572_864; // ~1.5 MB (base64 expands ~33%)
@@ -173,7 +174,10 @@ impl ScreenshotTool {
                 let size = bytes.len();
                 let mut encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 let truncated = if encoded.len() > MAX_BASE64_BYTES {
-                    encoded.truncate(encoded.floor_char_boundary(MAX_BASE64_BYTES));
+                    encoded.truncate(crate::util::floor_utf8_char_boundary(
+                        &encoded,
+                        MAX_BASE64_BYTES,
+                    ));
                     true
                 } else {
                     false

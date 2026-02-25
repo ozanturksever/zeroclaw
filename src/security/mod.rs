@@ -23,16 +23,21 @@ pub mod audit;
 pub mod bubblewrap;
 pub mod detect;
 pub mod docker;
+
+// Prompt injection defense (contributed from RustyClaw, MIT licensed)
 pub mod domain_matcher;
 pub mod estop;
 #[cfg(target_os = "linux")]
 pub mod firejail;
 #[cfg(feature = "sandbox-landlock")]
 pub mod landlock;
+pub mod leak_detector;
 pub mod otp;
 pub mod pairing;
 pub mod policy;
+pub mod prompt_guard;
 pub mod secrets;
+pub mod syscall_anomaly;
 pub mod traits;
 
 #[allow(unused_imports)]
@@ -50,7 +55,14 @@ pub use policy::{AutonomyLevel, SecurityPolicy};
 #[allow(unused_imports)]
 pub use secrets::SecretStore;
 #[allow(unused_imports)]
+pub use syscall_anomaly::{SyscallAnomalyAlert, SyscallAnomalyDetector, SyscallAnomalyKind};
+#[allow(unused_imports)]
 pub use traits::{NoopSandbox, Sandbox};
+// Prompt injection defense exports
+#[allow(unused_imports)]
+pub use leak_detector::{LeakDetector, LeakResult};
+#[allow(unused_imports)]
+pub use prompt_guard::{GuardAction, GuardResult, PromptGuard};
 
 /// Redact sensitive values for safe logging. Shows first 4 chars + "***" suffix.
 /// This function intentionally breaks the data-flow taint chain for static analysis.
